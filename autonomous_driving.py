@@ -257,6 +257,7 @@ class AutonomousDriving:
             offset=offset,
             left_lane=left_lane,
             right_lane=right_lane,
+            center_lane=center_lane,  # 중앙선 정보 전달 (더 강한 중앙 정렬)
             image_width=self.image_width,
             avoidance_command=self.current_avoidance_command,
             aruco_command=self.current_aruco_command
