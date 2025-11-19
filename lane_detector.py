@@ -158,8 +158,8 @@ class LaneDetector:
             lane_width = abs(right_x - left_x)
             min_lane_width = width_limit * 0.2  # 최소 차선 폭
             if lane_width < min_lane_width:
-                # 이전 값 사용
-                return self.prev_left_lane, self.prev_right_lane
+                # 이전 값 사용 (3개 모두 반환)
+                return self.prev_left_lane, self.prev_right_lane, self.prev_center_lane
             
             # 차선이 교차하거나 순서가 바뀐 경우 필터링
             if left_x >= right_x:
