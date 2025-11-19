@@ -5,6 +5,11 @@ Bird's Eye View 변환
 import cv2
 import numpy as np
 from typing import Tuple, Optional
+from config import (
+    BIRD_VIEW_TOP_WIDTH_RATIO,
+    BIRD_VIEW_BOTTOM_MARGIN_RATIO,
+    BIRD_VIEW_TOP_OFFSET_RATIO
+)
 
 
 class PerspectiveTransform:
@@ -40,22 +45,28 @@ class PerspectiveTransform:
     def _calculate_transform_matrix(self):
         """Perspective transform 매트릭스 계산"""
         # 원본 이미지의 ROI 영역에서 사다리꼴 영역 정의
-        # 하단 부분을 넓게, 상단 부분을 좁게 (원근감)
+        # 카메라가 아래를 향하므로 상단도 더 넓게 설정
         
         # 원본 포인트 (사다리꼴)
         # 하단: 넓게 (차선이 넓게 보임)
         bottom_width = self.image_width
-        bottom_margin = int(self.image_width * 0.1)  # 양쪽 10% 여유
+        bottom_margin = int(self.image_width * BIRD_VIEW_BOTTOM_MARGIN_RATIO)
         
-        # 상단: 좁게 (원근감)
-        top_width = int(self.image_width * 0.6)  # 상단은 60% 너비
+        # 상단: config에서 설정한 비율 사용 (카메라가 아래를 향하므로 더 넓게)
+        top_width = int(self.image_width * BIRD_VIEW_TOP_WIDTH_RATIO)
         top_margin = int((self.image_width - top_width) / 2)
         
+        # ROI 높이 계산
+        roi_height = self.roi_bottom - self.roi_top
+        
+        # 상단 포인트를 약간 아래로 조정 (카메라가 아래를 향하므로)
+        top_y_offset = int(roi_height * BIRD_VIEW_TOP_OFFSET_RATIO)
+        
         src_points = np.float32([
-            [bottom_margin, self.roi_bottom - self.roi_top],  # 하단 왼쪽
-            [self.image_width - bottom_margin, self.roi_bottom - self.roi_top],  # 하단 오른쪽
-            [top_margin, 0],  # 상단 왼쪽
-            [self.image_width - top_margin, 0]  # 상단 오른쪽
+            [bottom_margin, roi_height],  # 하단 왼쪽
+            [self.image_width - bottom_margin, roi_height],  # 하단 오른쪽
+            [top_margin, top_y_offset],  # 상단 왼쪽 (약간 아래로)
+            [self.image_width - top_margin, top_y_offset]  # 상단 오른쪽 (약간 아래로)
         ])
         
         # 변환 후 포인트 (직사각형)

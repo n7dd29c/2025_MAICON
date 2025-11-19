@@ -206,21 +206,23 @@ class AutonomousController:
                            left_lane: Optional[np.ndarray] = None,
                            right_lane: Optional[np.ndarray] = None,
                            image_width: int = 640,
-                           avoidance_command: Optional[Dict] = None) -> dict:
+                           avoidance_command: Optional[Dict] = None,
+                           aruco_command: Optional[Dict] = None) -> dict:
         """
-        제어 명령 생성
+        제어 명령 생성 (우선순위: 포트홀 회피 > ArUco 명령 > 차선 추종)
         
         Args:
             offset: 차선 중심으로부터의 오프셋
             left_lane: 왼쪽 차선 정보
             right_lane: 오른쪽 차선 정보
             image_width: 이미지 너비
-            avoidance_command: 회피 명령 (있으면 우선 적용)
+            avoidance_command: 회피 명령 (최우선)
+            aruco_command: ArUco 마커 명령 (2순위)
         
         Returns:
             control_command: 조향, 속도, 안전 정보를 포함한 딕셔너리
         """
-        # 회피 명령이 있으면 우선 적용
+        # 1순위: 포트홀 회피 명령 (최우선)
         if avoidance_command is not None and avoidance_command.get('action') != 'normal':
             target_offset = avoidance_command.get('target_offset', offset)
             avoidance_speed = avoidance_command.get('speed', self.min_speed)
@@ -246,7 +248,46 @@ class AutonomousController:
                 'is_safe': is_safe,
                 'safety_message': safety_message,
                 'offset': target_offset,
-                'avoidance_mode': True
+                'avoidance_mode': True,
+                'aruco_mode': False
+            }
+        
+        # 2순위: ArUco 마커 명령
+        if aruco_command is not None and aruco_command.get('action') != 'go_straight':
+            action = aruco_command.get('action', 'go_straight')
+            from config import ARUCO_TURN_ANGLE, ARUCO_TURN_SPEED
+            
+            if action == 'turn_right':
+                steering_angle = ARUCO_TURN_ANGLE  # 우회전
+                safety_message = "ArUco: 우회전"
+            elif action == 'turn_left':
+                steering_angle = -ARUCO_TURN_ANGLE  # 좌회전
+                safety_message = "ArUco: 좌회전"
+            elif action == 'stop':
+                steering_angle = 0.0
+                safety_message = "ArUco: 정지"
+                return {
+                    'steering_angle': 0.0,
+                    'speed': 0.0,
+                    'is_safe': False,
+                    'safety_message': safety_message,
+                    'offset': offset,
+                    'avoidance_mode': False,
+                    'aruco_mode': True
+                }
+            else:
+                # go_straight는 차선 추종으로 처리
+                steering_angle = self.calculate_steering(offset, image_width)
+                safety_message = "ArUco: 직진 (차선 추종)"
+            
+            return {
+                'steering_angle': steering_angle,
+                'speed': ARUCO_TURN_SPEED,
+                'is_safe': True,
+                'safety_message': safety_message,
+                'offset': offset,
+                'avoidance_mode': False,
+                'aruco_mode': True
             }
         
         # 정상 주행 모드

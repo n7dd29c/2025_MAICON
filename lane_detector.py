@@ -369,21 +369,21 @@ class LaneDetector:
                         (x2, y2),
                         (255, 255, 255), 4)  # 하얀색, 두껍게
             
-            # 왼쪽 차선 그리기
+            # 왼쪽 차선 그리기 (노란색)
             if left_lane is not None:
                 x1, y1, x2, y2 = left_lane[0]
                 cv2.line(warped_vis, 
                         (x1, y1), 
                         (x2, y2),
-                        (255, 0, 0), 3)
+                        (0, 255, 255), 3)  # 노란색 (BGR)
             
-            # 오른쪽 차선 그리기
+            # 오른쪽 차선 그리기 (노란색)
             if right_lane is not None:
                 x1, y1, x2, y2 = right_lane[0]
                 cv2.line(warped_vis, 
                         (x1, y1), 
                         (x2, y2),
-                        (0, 0, 255), 3)
+                        (0, 255, 255), 3)  # 노란색 (BGR)
             
             # 중심점 표시
             if center_point is not None:
@@ -428,21 +428,21 @@ class LaneDetector:
                         (x2, y2 + self.roi_top),
                         (255, 255, 255), 4)  # 하얀색, 두껍게
             
-            # 왼쪽 차선 그리기
+            # 왼쪽 차선 그리기 (노란색)
             if left_lane is not None:
                 x1, y1, x2, y2 = left_lane[0]
                 cv2.line(vis_frame, 
                         (x1, y1 + self.roi_top), 
                         (x2, y2 + self.roi_top),
-                        (255, 0, 0), 3)
+                        (0, 255, 255), 3)  # 노란색 (BGR)
             
-            # 오른쪽 차선 그리기
+            # 오른쪽 차선 그리기 (노란색)
             if right_lane is not None:
                 x1, y1, x2, y2 = right_lane[0]
                 cv2.line(vis_frame, 
                         (x1, y1 + self.roi_top), 
                         (x2, y2 + self.roi_top),
-                        (0, 0, 255), 3)
+                        (0, 255, 255), 3)  # 노란색 (BGR)
             
             # 중심점 표시
             if center_point is not None:

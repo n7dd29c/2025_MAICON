@@ -12,7 +12,8 @@ from lane_detector import LaneDetector
 from autonomous_control import AutonomousController
 from object_detector import ObjectDetector
 from avoidance_planner import AvoidancePlanner
-from config import USE_BIRD_VIEW, USE_GSTREAMER
+from aruco_detector import ArUcoDetector
+from config import USE_BIRD_VIEW, USE_GSTREAMER, USE_ARUCO
 
 
 class AutonomousDriving:
@@ -65,6 +66,13 @@ class AutonomousDriving:
             image_height=image_height
         )
         
+        # ArUco 마커 감지기 초기화
+        if USE_ARUCO:
+            from config import ARUCO_DICTIONARY
+            self.aruco_detector = ArUcoDetector(dictionary_id=ARUCO_DICTIONARY)
+        else:
+            self.aruco_detector = None
+        
         # 카메라 초기화
         self.cap: Optional[cv2.VideoCapture] = None
         
@@ -81,6 +89,11 @@ class AutonomousDriving:
         
         # 회피 명령 저장
         self.current_avoidance_command = None
+        
+        # ArUco 명령 저장
+        self.current_aruco_command = None
+        self.aruco_command_start_time = None
+        self.aruco_command_duration = 0.0
         
     def initialize_camera(self, use_gstreamer: bool = True) -> bool:
         """
@@ -161,7 +174,7 @@ class AutonomousDriving:
         """
         self.frame_count += 1
         
-        # 짝수 프레임: 포트홀 감지 및 회피 계획
+        # 짝수 프레임: 포트홀 감지 및 ArUco 마커 감지
         if self.frame_count % 2 == 0:
             # 포트홀 감지 임시 비활성화 (오탐 방지 - 차선 추종 테스트용)
             potholes = []
@@ -170,7 +183,27 @@ class AutonomousDriving:
             # 정상 주행만 (포트홀 회피 비활성화)
             self.current_avoidance_command = {'action': 'normal'}
             
-            # 시각화 (차선만 표시)
+            # ArUco 마커 감지
+            aruco_markers = []
+            if USE_ARUCO and self.aruco_detector is not None:
+                aruco_command, aruco_markers = self.aruco_detector.detect_markers(frame)
+                
+                if aruco_command is not None:
+                    # ArUco 명령이 감지되면 저장
+                    self.current_aruco_command = aruco_command
+                    from config import ARUCO_TURN_DURATION
+                    self.aruco_command_start_time = time.time()
+                    self.aruco_command_duration = ARUCO_TURN_DURATION
+                else:
+                    # ArUco 명령이 없으면 이전 명령 지속 시간 확인
+                    if self.aruco_command_start_time is not None:
+                        elapsed = time.time() - self.aruco_command_start_time
+                        if elapsed >= self.aruco_command_duration:
+                            # 지속 시간 경과 시 명령 해제
+                            self.current_aruco_command = None
+                            self.aruco_command_start_time = None
+            
+            # 시각화 (차선 및 ArUco 마커 표시)
             vis_frame = frame.copy()
             
             # 차선 정보 표시
@@ -183,8 +216,15 @@ class AutonomousDriving:
                     vis_frame, self.last_left_lane, self.last_right_lane, center_point, None
                 )
             
-            # 포트홀 감지 비활성화 메시지 표시
-            cv2.putText(vis_frame, "포트홀 감지 비활성화 (테스트 모드)",
+            # ArUco 마커 시각화
+            if USE_ARUCO and self.aruco_detector is not None and aruco_markers:
+                vis_frame = self.aruco_detector.draw_markers(vis_frame, aruco_markers)
+            
+            # 상태 메시지 표시
+            status_msg = "포트홀 감지 비활성화 (테스트 모드)"
+            if self.current_aruco_command:
+                status_msg += f" | ArUco: {self.current_aruco_command.get('action', 'unknown')}"
+            cv2.putText(vis_frame, status_msg,
                        (10, self.image_height - 50),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
             
@@ -212,13 +252,14 @@ class AutonomousDriving:
         offset = self.lane_detector.calculate_offset(center_point)
         self.last_offset = offset
         
-        # 제어 명령 생성 (회피 명령 포함)
+        # 제어 명령 생성 (우선순위: 포트홀 회피 > ArUco 명령 > 차선 추종)
         control_command = self.controller.get_control_command(
             offset=offset,
             left_lane=left_lane,
             right_lane=right_lane,
             image_width=self.image_width,
-            avoidance_command=self.current_avoidance_command
+            avoidance_command=self.current_avoidance_command,
+            aruco_command=self.current_aruco_command
         )
         
         # 시각화 (중앙선 포함)
@@ -304,6 +345,9 @@ class AutonomousDriving:
                 if not ret:
                     print("프레임 읽기 실패")
                     break
+                
+                # 프레임 180도 회전 (뒤집힌 영상 보정)
+                frame = cv2.rotate(frame, cv2.ROTATE_180)
                 
                 # 프레임 처리
                 processed_frame, control_command = self.process_frame(frame)
