@@ -1,0 +1,17 @@
+# Jetson Nano 자율주행 시스템 필수 라이브러리
+
+# 컴퓨터 비전
+opencv-python>=4.8.0
+opencv-contrib-python>=4.8.0
+
+# 수치 연산
+numpy>=1.24.0
+
+# 하드웨어 제어 (필요시)
+# Jetson.GPIO>=2.0.0  # GPIO 제어용
+# adafruit-circuitpython-servokit  # 서보 모터 제어용
+# pyserial>=3.5  # 시리얼 통신용
+
+# 유틸리티
+# Pillow>=10.0.0  # 이미지 처리 (선택사항)
+
