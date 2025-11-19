@@ -63,6 +63,7 @@ class AutonomousController:
         
         # 이전 오프셋 (미분 제어용)
         self.prev_offset = 0.0
+        self.prev_steering_angle = 0.0  # 조향 각도 스무딩용
         
         # 안전 임계값
         self.safe_offset_threshold = 50  # 픽셀 단위
@@ -72,28 +73,41 @@ class AutonomousController:
         
         # 모터 제어 파라미터
         self.base_speed_range = 127  # TikiMini 모터 속도 범위 (-127 ~ 127)
-        from config import TURN_SENSITIVITY
+        from config import TURN_SENSITIVITY, STEERING_DEADZONE
         self.turn_sensitivity = TURN_SENSITIVITY  # 조향 민감도
+        self.deadzone = STEERING_DEADZONE  # 데드존
         
     def calculate_steering(self, offset: float, image_width: int = 640) -> float:
         """
-        조향 각도 계산 (PID 제어)
+        조향 각도 계산 (PID 제어 + 스무딩)
         
         Args:
             offset: 차선 중심으로부터의 오프셋 (픽셀)
+                   양수: 차선 중심이 오른쪽에 있음 -> 왼쪽으로 조향 필요
+                   음수: 차선 중심이 왼쪽에 있음 -> 오른쪽으로 조향 필요
             image_width: 이미지 너비
             
         Returns:
             steering_angle: 조향 각도 (-max_steering_angle ~ max_steering_angle)
+                          양수: 오른쪽 회전, 음수: 왼쪽 회전
         """
+        # 데드존 적용 (작은 오프셋 무시)
+        if abs(offset) < self.deadzone:
+            offset = 0.0
+        
         # 정규화된 오프셋 (-1.0 ~ 1.0)
         normalized_offset = offset / (image_width / 2)
         
+        # 오프셋이 양수면 차선 중심이 오른쪽에 있으므로 왼쪽으로 조향 (음수)
+        # 오프셋이 음수면 차선 중심이 왼쪽에 있으므로 오른쪽으로 조향 (양수)
+        # 따라서 부호를 반대로 해야 함
+        target_offset = -normalized_offset
+        
         # 비례 제어
-        p_term = self.kp * normalized_offset
+        p_term = self.kp * target_offset
         
         # 미분 제어
-        d_term = self.kd * (normalized_offset - self.prev_offset)
+        d_term = self.kd * (target_offset - self.prev_offset)
         
         # 조향 각도 계산
         steering_angle = (p_term + d_term) * self.max_steering_angle
@@ -103,8 +117,14 @@ class AutonomousController:
                                 -self.max_steering_angle, 
                                 self.max_steering_angle)
         
+        # 조향 각도 스무딩 (비틀거림 방지)
+        smoothing_factor = 0.7  # 이전 값 70% 유지
+        steering_angle = (smoothing_factor * self.prev_steering_angle + 
+                         (1 - smoothing_factor) * steering_angle)
+        
         # 이전 값 업데이트
-        self.prev_offset = normalized_offset
+        self.prev_offset = target_offset
+        self.prev_steering_angle = steering_angle
         
         return steering_angle
     
@@ -139,7 +159,8 @@ class AutonomousController:
     
     def check_safety(self, offset: float, 
                     left_lane: Optional[np.ndarray] = None,
-                    right_lane: Optional[np.ndarray] = None) -> Tuple[bool, str]:
+                    right_lane: Optional[np.ndarray] = None,
+                    image_width: int = 640) -> Tuple[bool, str]:
         """
         안전성 검사
         
@@ -150,10 +171,33 @@ class AutonomousController:
         if left_lane is None or right_lane is None:
             return False, "차선 미감지 - 정지 필요"
         
-        # 노란선 바깥으로 나가는지 확인 (오프셋이 너무 큰 경우)
+        # 차선 위치 확인
+        left_x = left_lane[0][0]
+        right_x = right_lane[0][0]
+        center_x = (left_x + right_x) // 2
+        image_center_x = image_width // 2
+        
+        # 노란색 선 바깥으로 나가는지 확인
+        # 오프셋이 양수면 차선 중심이 오른쪽에 있음 (왼쪽으로 치우침)
+        # 오프셋이 음수면 차선 중심이 왼쪽에 있음 (오른쪽으로 치우침)
         abs_offset = abs(offset)
-        if abs_offset > self.safe_offset_threshold * 1.5:
-            return False, f"차선 이탈 위험 - 오프셋: {abs_offset:.1f}px"
+        
+        # 차선 이탈 위험 (임계값보다 크면)
+        if abs_offset > self.safe_offset_threshold * 1.2:
+            # 어느 쪽으로 치우쳤는지 확인
+            if offset > 0:
+                direction = "왼쪽"
+            else:
+                direction = "오른쪽"
+            return False, f"차선 이탈 위험 ({direction}) - 오프셋: {abs_offset:.1f}px"
+        
+        # 차선 경계 확인 (노란색 선 위치)
+        # 왼쪽 차선이 너무 오른쪽에 있거나, 오른쪽 차선이 너무 왼쪽에 있으면 위험
+        lane_width = abs(right_x - left_x)
+        expected_lane_width = image_width * 0.3  # 예상 차선 폭
+        
+        if lane_width < expected_lane_width * 0.5:
+            return False, f"차선 폭 이상 - 너무 좁음: {lane_width:.1f}px"
         
         return True, "정상 주행"
     
@@ -208,7 +252,14 @@ class AutonomousController:
         # 정상 주행 모드
         steering_angle = self.calculate_steering(offset, image_width)
         speed = self.calculate_speed(offset, left_lane, right_lane)
-        is_safe, safety_message = self.check_safety(offset, left_lane, right_lane)
+        is_safe, safety_message = self.check_safety(offset, left_lane, right_lane, image_width)
+        
+        # 차선 이탈 방지: 안전하지 않으면 강제 조정
+        if not is_safe and abs(offset) > self.safe_offset_threshold:
+            # 차선 중심으로 강제 복귀
+            correction_offset = -offset * 0.5  # 50% 보정
+            steering_angle = self.calculate_steering(correction_offset, image_width)
+            speed = self.min_speed  # 감속
         
         return {
             'steering_angle': steering_angle,

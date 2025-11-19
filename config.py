@@ -18,12 +18,13 @@ YELLOW_LANE_LOWER = [20, 100, 100]  # HSV
 YELLOW_LANE_UPPER = [30, 255, 255]
 
 # 제어 설정
-MAX_STEERING_ANGLE = 30.0  # 도
-KP = 0.5  # 비례 게인
-KD = 0.1  # 미분 게인
+MAX_STEERING_ANGLE = 25.0  # 도 (30 -> 25, 과도한 조향 방지)
+KP = 0.3  # 비례 게인 (0.4 -> 0.3, 더 부드러운 조향)
+KD = 0.2  # 미분 게인 (0.15 -> 0.2, 안정성 향상)
 MAX_SPEED = 0.5  # 0.0 ~ 1.0
 MIN_SPEED = 0.2  # 0.0 ~ 1.0
-SAFE_OFFSET_THRESHOLD = 50  # 픽셀
+SAFE_OFFSET_THRESHOLD = 40  # 픽셀 (50 -> 40, 더 엄격한 기준)
+STEERING_DEADZONE = 5  # 픽셀 (작은 오프셋 무시)
 
 # 성능 설정
 SMOOTHING_FACTOR = 0.7  # 차선 스무딩 계수

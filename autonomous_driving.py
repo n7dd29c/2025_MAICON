@@ -89,6 +89,7 @@ class AutonomousDriving:
         """
         if use_gstreamer:
             # Jetson Nano CSI 카메라용 GStreamer 파이프라인
+            # 베이스라인 코드와 동일한 파이프라인 사용
             pipeline = (
                 f"nvarguscamerasrc ! video/x-raw(memory:NVMM), "
                 f"width={self.image_width}, height={self.image_height}, "
@@ -97,7 +98,35 @@ class AutonomousDriving:
                 "videoconvert ! video/x-raw, format=BGR ! appsink"
             )
             
-            self.cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+            # 최대 3번 재시도
+            max_retries = 3
+            for attempt in range(max_retries):
+                self.cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+                
+                # 카메라가 열릴 때까지 대기
+                time.sleep(1.0)
+                
+                if self.cap.isOpened():
+                    # 프레임 읽기 테스트
+                    ret, test_frame = self.cap.read()
+                    if ret and test_frame is not None:
+                        print(f"카메라 초기화 완료: {self.image_width}x{self.image_height} (GStreamer: True)")
+                        return True
+                    else:
+                        print(f"경고: 프레임 읽기 실패 (시도 {attempt + 1}/{max_retries})")
+                        self.cap.release()
+                        time.sleep(0.5)
+                else:
+                    print(f"경고: 카메라 열기 실패 (시도 {attempt + 1}/{max_retries})")
+                    if attempt < max_retries - 1:
+                        time.sleep(0.5)
+            
+            print("카메라 초기화 실패: 여러 번 시도했지만 실패했습니다.")
+            print("해결 방법:")
+            print("1. 다른 프로세스에서 카메라를 사용 중인지 확인: ps aux | grep python")
+            print("2. Jetson Nano를 재부팅")
+            print("3. config.py에서 USE_GSTREAMER = False로 설정하여 일반 카메라 모드 시도")
+            return False
         else:
             # 일반 USB 카메라
             self.cap = cv2.VideoCapture(self.camera_id)
@@ -108,13 +137,18 @@ class AutonomousDriving:
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.image_height)
                 self.cap.set(cv2.CAP_PROP_FPS, self.fps_target)
                 self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 버퍼 크기 최소화
-        
-        if not self.cap.isOpened():
-            print(f"카메라를 열 수 없습니다. (GStreamer: {use_gstreamer})")
-            return False
-        
-        print(f"카메라 초기화 완료: {self.image_width}x{self.image_height} (GStreamer: {use_gstreamer})")
-        return True
+                
+                # 프레임 읽기 테스트
+                ret, test_frame = self.cap.read()
+                if ret and test_frame is not None:
+                    print(f"카메라 초기화 완료: {self.image_width}x{self.image_height} (GStreamer: False)")
+                    return True
+                else:
+                    print("경고: 카메라 초기화는 되었지만 프레임 읽기 실패")
+                    return False
+            else:
+                print(f"카메라를 열 수 없습니다. (카메라 ID: {self.camera_id})")
+                return False
     
     def process_frame(self, frame: np.ndarray) -> tuple:
         """
@@ -129,79 +163,50 @@ class AutonomousDriving:
         
         # 짝수 프레임: 포트홀 감지 및 회피 계획
         if self.frame_count % 2 == 0:
-            # 포트홀 감지
-            potholes = self.object_detector.detect_potholes(frame)
+            # 포트홀 감지 임시 비활성화 (오탐 방지 - 차선 추종 테스트용)
+            potholes = []
+            # potholes = self.object_detector.detect_potholes(frame)  # 주석 처리
             
-            # 주행 경로에 있는 포트홀 찾기
-            pothole_in_path = None
-            for pothole in potholes:
-                if self.object_detector.is_pothole_in_path(
-                    pothole, self.last_left_lane, self.last_right_lane, self.image_width
-                ):
-                    pothole_in_path = pothole
-                    break
+            # 정상 주행만 (포트홀 회피 비활성화)
+            self.current_avoidance_command = {'action': 'normal'}
             
-            # 회피 계획
-            if pothole_in_path is not None:
-                # 회피 시작
-                self.current_avoidance_command = self.avoidance_planner.plan_avoidance(
-                    pothole_in_path,
-                    self.last_left_lane,
-                    self.last_right_lane,
-                    self.last_offset
-                )
-            else:
-                # 복귀 조건 확인
-                if self.avoidance_planner.check_return_condition(
-                    self.last_offset,
-                    self.last_left_lane,
-                    self.last_right_lane
-                ):
-                    # 차선 복귀
-                    self.current_avoidance_command = self.avoidance_planner.plan_return(
-                        self.last_offset,
-                        self.last_left_lane,
-                        self.last_right_lane
-                    )
-                else:
-                    # 정상 주행
-                    self.current_avoidance_command = {'action': 'normal'}
+            # 시각화 (차선만 표시)
+            vis_frame = frame.copy()
             
-            # 시각화
-            vis_frame = self.object_detector.draw_potholes(
-                frame, potholes, in_path_only=True,
-                left_lane=self.last_left_lane,
-                right_lane=self.last_right_lane
-            )
-            
-            # 차선 정보도 표시 (참고용)
+            # 차선 정보 표시
             if self.last_left_lane is not None and self.last_right_lane is not None:
+                # 중앙선도 포함하여 계산
                 center_point = self.lane_detector.calculate_center(
-                    self.last_left_lane, self.last_right_lane
+                    self.last_left_lane, self.last_right_lane, None
                 )
                 vis_frame = self.lane_detector.draw_lanes(
-                    vis_frame, self.last_left_lane, self.last_right_lane, center_point
+                    vis_frame, self.last_left_lane, self.last_right_lane, center_point, None
                 )
             
-            # 회피 정보 표시
-            if self.current_avoidance_command and self.current_avoidance_command.get('action') != 'normal':
-                action = self.current_avoidance_command.get('action', 'normal')
-                cv2.putText(vis_frame, f"회피 모드: {action}",
-                           (10, self.image_height - 50),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            # 포트홀 감지 비활성화 메시지 표시
+            cv2.putText(vis_frame, "포트홀 감지 비활성화 (테스트 모드)",
+                       (10, self.image_height - 50),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
             
             return vis_frame, None
         
         # 홀수 프레임: 차선 인식 및 자율주행 제어
-        # 차선 감지
-        left_lane, right_lane = self.lane_detector.detect_lanes(frame)
+        # 차선 감지 (중앙선 포함)
+        left_lane, right_lane, center_lane = self.lane_detector.detect_lanes(frame)
+        
+        # 초기 차선 감지 실패 시 대기 (처음 몇 프레임)
+        # 중앙선이 없고 양쪽 차선도 없으면 대기
+        if (center_lane is None and (left_lane is None or right_lane is None)) and self.frame_count <= 10:
+            # 초기 상태에서는 차선 감지 대기
+            print(f"차선 감지 대기 중... (프레임 {self.frame_count})")
+            return frame, None
         
         # 차선 정보 저장 (회피 계획에 사용)
         self.last_left_lane = left_lane
         self.last_right_lane = right_lane
         
-        # 중심점 계산
-        center_point = self.lane_detector.calculate_center(left_lane, right_lane)
+        # 중심점 계산 (중앙선 우선)
+        center_point = self.lane_detector.calculate_center(left_lane, right_lane, center_lane)
         
         # 오프셋 계산
         offset = self.lane_detector.calculate_offset(center_point)
@@ -216,9 +221,9 @@ class AutonomousDriving:
             avoidance_command=self.current_avoidance_command
         )
         
-        # 시각화
+        # 시각화 (중앙선 포함)
         vis_frame = self.lane_detector.draw_lanes(
-            frame, left_lane, right_lane, center_point
+            frame, left_lane, right_lane, center_point, center_lane
         )
         
         # 제어 정보 오버레이
