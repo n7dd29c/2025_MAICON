@@ -252,6 +252,9 @@ class AutonomousDriving:
         offset = self.lane_detector.calculate_offset(center_point)
         self.last_offset = offset
         
+        # 곡선 정보 가져오기
+        is_curve, curve_radius = self.lane_detector.get_curve_info()
+        
         # 제어 명령 생성 (우선순위: 포트홀 회피 > ArUco 명령 > 차선 추종)
         control_command = self.controller.get_control_command(
             offset=offset,
@@ -259,6 +262,8 @@ class AutonomousDriving:
             right_lane=right_lane,
             center_lane=center_lane,  # 중앙선 정보 전달 (더 강한 중앙 정렬)
             image_width=self.image_width,
+            is_curve=is_curve,  # 곡선 구간 여부
+            curve_radius=curve_radius,  # 곡선 반경
             avoidance_command=self.current_avoidance_command,
             aruco_command=self.current_aruco_command
         )
@@ -310,13 +315,14 @@ class AutonomousDriving:
         steering_angle = control_command['steering_angle']
         speed = control_command['speed']
         
-        # 안전하지 않으면 정지
+        # 안전하지 않으면 경고 출력하고 속도만 줄임 (조향은 계속 실행)
         if not control_command['is_safe']:
             print(f"경고: {control_command['safety_message']}")
-            self.controller.stop_motors()
-            return
+            # 차선 이탈 위험일 때는 조향을 실행하여 복귀하도록 함
+            # 속도만 줄임
+            speed = min(speed, self.controller.min_speed * 0.5)  # 최소 속도의 50%로 감속
         
-        # TikiMini API로 모터 제어
+        # TikiMini API로 모터 제어 (조향은 항상 실행)
         self.controller.execute_motor_control(steering_angle, speed)
     
     def run(self, show_preview: bool = True, save_video: bool = False):

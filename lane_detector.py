@@ -1,8 +1,7 @@
-"""
-차선 인식 모듈
-Jetson Nano 최적화된 차선 감지 시스템
-Bird's Eye View 적용
-"""
+# -*- coding: utf-8 -*-
+# 차선 인식 모듈
+# Jetson Nano 최적화된 차선 감지 시스템
+# Bird's Eye View 적용
 import cv2
 import numpy as np
 from typing import Tuple, Optional, List
@@ -10,20 +9,18 @@ from perspective_transform import PerspectiveTransform
 
 
 class LaneDetector:
-    """차선 인식 클래스 - 흰색(중앙) 및 노란색(양쪽) 차선 감지"""
+    # 차선 인식 클래스 - 흰색(중앙) 및 노란색(양쪽) 차선 감지
     
     def __init__(self, 
                  image_width: int = 640,
                  image_height: int = 480,
                  roi_ratio: float = 0.6,
                  use_bird_view: bool = True):
-        """
-        Args:
-            image_width: 처리할 이미지 너비
-            image_height: 처리할 이미지 높이
-            roi_ratio: 관심 영역(ROI) 비율 (하단 부분만 사용)
-            use_bird_view: Bird's Eye View 사용 여부
-        """
+        # Args:
+        #     image_width: 처리할 이미지 너비
+        #     image_height: 처리할 이미지 높이
+        #     roi_ratio: 관심 영역(ROI) 비율 (하단 부분만 사용)
+        #     use_bird_view: Bird's Eye View 사용 여부
         self.image_width = image_width
         self.image_height = image_height
         self.roi_ratio = roi_ratio
@@ -60,8 +57,18 @@ class LaneDetector:
         self.prev_center_lane = None
         self.smoothing_factor = 0.8  # 0.7 -> 0.8 (더 강한 스무딩)
         
+        # 곡선 정보 저장
+        self.left_lane_curve_radius = None
+        self.right_lane_curve_radius = None
+        self.center_lane_curve_radius = None
+        self.is_curve = False
+        
+        # 곡선 피팅 설정
+        from config import USE_CURVE_FITTING
+        self.use_curve_fitting = USE_CURVE_FITTING
+        
     def preprocess_image(self, frame: np.ndarray) -> np.ndarray:
-        """이미지 전처리 (Bird's Eye View 변환 포함)"""
+        # 이미지 전처리 (Bird's Eye View 변환 포함)
         # 리사이즈 (성능 향상)
         frame = cv2.resize(frame, (self.image_width, self.image_height))
         
@@ -75,9 +82,15 @@ class LaneDetector:
         return roi
     
     def detect_lanes(self, frame: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
-        """
-        차선 감지 (색상 기반, Hough 변환 없이)
-        shape[:2]
+        # 차선 감지 (색상 기반, Hough 변환 없이)
+        # Returns: (left_lane, right_lane, center_lane)
+        
+        # 전처리
+        roi = self.preprocess_image(frame)
+        
+        # 이미지 크기 확인
+        if self.use_bird_view:
+            height, width = roi.shape[:2]
         else:
             height, width = roi.shape[:2]
         
@@ -143,6 +156,14 @@ class LaneDetector:
             # 중앙선이 감지되지 않으면 이전 값 사용
             center_lane = self.prev_center_lane
         
+        # 곡선 여부 업데이트 (중앙선 또는 양쪽 차선 중 하나라도 곡선이면 곡선 구간)
+        self.is_curve = (self.center_lane_curve_radius is not None and 
+                        self.center_lane_curve_radius < float('inf')) or \
+                       (self.left_lane_curve_radius is not None and 
+                        self.left_lane_curve_radius < float('inf')) or \
+                       (self.right_lane_curve_radius is not None and 
+                        self.right_lane_curve_radius < float('inf'))
+        
         # 차선 유효성 검사 (너무 가까이 있거나 이상한 경우 필터링)
         if left_lane is not None and right_lane is not None:
             left_x = left_lane[0][0]
@@ -170,20 +191,16 @@ class LaneDetector:
     
     def _detect_lane_from_mask(self, mask: np.ndarray, bottom_half: int, height: int, width: int, 
                                is_center: bool = False, is_left: bool = False) -> Optional[np.ndarray]:
-        """
-        마스크에서 색상 기반으로 차선 위치 찾기 (히스토그램 방식)
-        
-        Args:
-            mask: 차선 마스크 (흰색 또는 노란색)
-            bottom_half: 하단 절반 시작 y 좌표
-            height: 이미지 높이
-            width: 이미지 너비
-            is_center: 중앙선인지 여부
-            is_left: 왼쪽 차선인지 여부
-        
-        Returns:
-            lane: 차선 좌표 [x1, y1, x2, y2] 또는 None
-        """
+        # 마스크에서 색상 기반으로 차선 위치 찾기 (히스토그램 방식)
+        # Args:
+        #     mask: 차선 마스크 (흰색 또는 노란색)
+        #     bottom_half: 하단 절반 시작 y 좌표
+        #     height: 이미지 높이
+        #     width: 이미지 너비
+        #     is_center: 중앙선인지 여부
+        #     is_left: 왼쪽 차선인지 여부
+        # Returns:
+        #     lane: 차선 좌표 [x1, y1, x2, y2] 또는 None
         if mask is None or mask.size == 0:
             return None
         
@@ -223,142 +240,91 @@ class LaneDetector:
         if len(lane_points) < 2:
             return None
         
-        # 차선 포인트들을 직선으로 피팅
+        # 차선 포인트들을 곡선 또는 직선으로 피팅
         lane_points = np.array(lane_points)
         x_coords = lane_points[:, 0]
         y_coords = lane_points[:, 1]
         
-        # 최소 제곱법으로 직선 피팅 (x = my + b 형태)
-        if len(x_coords) > 1:
-            coeffs = np.polyfit(y_coords, x_coords, 1)
-            slope = coeffs[0]  # m
-            intercept = coeffs[1]  # b
-            
-            # 하단과 상단의 x 좌표 계산
-            y1 = mask_height - 1  # 하단
-            y2 = mask_bottom_half  # 상단
-            
-            x1 = int(slope * y1 + intercept)
-            x2 = int(slope * y2 + intercept)
-            
-            # 이미지 경계 내로 제한
-            x1 = max(0, min(mask_width - 1, x1))
-            x2 = max(0, min(mask_width - 1, x2))
-            
-            return np.array([[x1, y1, x2, y2]], dtype=np.int32)
+        if len(x_coords) < 2:
+            return None
         
-        return None
+        # 곡선 피팅 사용 여부 확인
+        from config import USE_CURVE_FITTING, CURVE_DETECTION_THRESHOLD
+        
+        if self.use_curve_fitting and len(x_coords) >= 3:
+            # 2차 다항식으로 곡선 피팅 (x = ay^2 + by + c)
+            try:
+                coeffs = np.polyfit(y_coords, x_coords, 2)
+                a, b, c = coeffs[0], coeffs[1], coeffs[2]
+                
+                # 곡선인지 확인 (2차 계수가 충분히 크면 곡선)
+                is_curve = abs(a) > CURVE_DETECTION_THRESHOLD
+                
+                if is_curve:
+                    # 곡선 반경 계산 (하단 지점에서)
+                    y_bottom = mask_height - 1
+                    # 곡선의 곡률: k = |f''(y)| / (1 + f'(y)^2)^(3/2)
+                    # f(y) = ay^2 + by + c
+                    # f'(y) = 2ay + b
+                    # f''(y) = 2a
+                    dy_dx = 2 * a * y_bottom + b
+                    d2y_dx2 = 2 * a
+                    curvature = abs(d2y_dx2) / ((1 + dy_dx**2)**1.5)
+                    curve_radius = 1.0 / curvature if curvature > 0 else float('inf')
+                    
+                    # 곡선 정보 저장 (나중에 조향 계산에 사용)
+                    if is_center:
+                        self.center_lane_curve_radius = curve_radius
+                    elif is_left:
+                        self.left_lane_curve_radius = curve_radius
+                    else:
+                        self.right_lane_curve_radius = curve_radius
+                    
+                    # 곡선을 여러 점으로 표현 (시각화 및 조향 계산용)
+                    y1 = mask_height - 1  # 하단
+                    y2 = mask_bottom_half  # 상단
+                    
+                    # 여러 점 계산 (곡선 추적)
+                    num_points = 10
+                    y_points = np.linspace(y1, y2, num_points)
+                    x_points = a * y_points**2 + b * y_points + c
+                    
+                    # 시작점과 끝점 사용 (기존 형식 유지)
+                    x1 = int(x_points[0])
+                    x2 = int(x_points[-1])
+                    
+                    # 이미지 경계 내로 제한
+                    x1 = max(0, min(mask_width - 1, x1))
+                    x2 = max(0, min(mask_width - 1, x2))
+                    
+                    return np.array([[x1, y1, x2, y2]], dtype=np.int32)
+            except:
+                # 곡선 피팅 실패 시 직선으로 폴백
+                pass
+        
+        # 직선 피팅 (기본 또는 곡선 피팅 실패 시)
+        coeffs = np.polyfit(y_coords, x_coords, 1)
+        slope = coeffs[0]  # m
+        intercept = coeffs[1]  # b
+        
+        # 하단과 상단의 x 좌표 계산
+        y1 = mask_height - 1  # 하단
+        y2 = mask_bottom_half  # 상단
+        
+        x1 = int(slope * y1 + intercept)
+        x2 = int(slope * y2 + intercept)
+        
+        # 이미지 경계 내로 제한
+        x1 = max(0, min(mask_width - 1, x1))
+        x2 = max(0, min(mask_width - 1, x2))
+        
+        return np.array([[x1, y1, x2, y2]], dtype=np.int32)
     
-    # ============================================================
-    # 레거시 코드: Hough 변환 방식 (현재 사용 안 함, 색상 기반 방식 사용)
-    # ============================================================
-    # 
-    # def _classify_lanes(self, lines: np.ndarray, white_mask: np.ndarray) -> Tuple[List, List, List]:
-    #     """차선을 왼쪽/오른쪽/중앙으로 분류 (기울기 + 위치 기반)"""
-    #     left_lines = []
-    #     right_lines = []
-    #     center_lines = []
-    #     
-    #     if self.use_bird_view:
-    #         mid_x = self.warped_width // 2
-    #         width_limit = self.warped_width
-    #     else:
-    #         mid_x = self.image_width // 2
-    #         width_limit = self.image_width
-    #     
-    #     for line in lines:
-    #         x1, y1, x2, y2 = line[0]
-    #         
-    #         # 수평선 제외
-    #         if abs(y2 - y1) < 10:
-    #             continue
-    #         
-    #         # 기울기 계산
-    #         slope = (y2 - y1) / (x2 - x1) if (x2 - x1) != 0 else 0
-    #         
-    #         # 기울기 필터링 (너무 수평이거나 수직인 선 제외)
-    #         if abs(slope) < 0.2 or abs(slope) > 5:
-    #             continue
-    #         
-    #         # 위치 기반 분류 (하단 부분의 x 좌표 기준)
-    #         if y2 > y1:
-    #             bottom_x = x2
-    #         else:
-    #             bottom_x = x1
-    #         
-    #         # 중앙선 판단: 중앙 영역에 있고 기울기가 작은 선 (하얀색 선)
-    #         # 중앙 영역: 이미지 중앙 ± 30%
-    #         center_zone_left = mid_x * 0.7
-    #         center_zone_right = mid_x * 1.3
-    #         
-    #         # 하얀색 마스크에서 선이 지나가는 부분 확인
-    #         line_mid_x = (x1 + x2) // 2
-    #         line_mid_y = (y1 + y2) // 2
-    #         is_white = False
-    #         if 0 <= line_mid_x < width_limit and 0 <= line_mid_y < white_mask.shape[0]:
-    #             is_white = white_mask[line_mid_y, line_mid_x] > 0
-    #         
-    #         # 중앙선: 중앙 영역에 있고 기울기가 작으며 하얀색인 선
-    #         if (center_zone_left <= bottom_x <= center_zone_right and 
-    #             abs(slope) < 0.5 and is_white):
-    #             center_lines.append(line[0])
-    #         # 왼쪽 차선: 음의 기울기 또는 중앙보다 왼쪽에 위치
-    #         elif slope < -0.2 or (slope < 0.2 and bottom_x < center_zone_left):
-    #             left_lines.append(line[0])
-    #         # 오른쪽 차선: 양의 기울기 또는 중앙보다 오른쪽에 위치
-    #         elif slope > 0.2 or (slope > -0.2 and bottom_x > center_zone_right):
-    #             right_lines.append(line[0])
-    #     
-    #     return left_lines, right_lines, center_lines
-    # 
-    # def _average_lane(self, lines: List) -> Optional[np.ndarray]:
-    #     """여러 선을 평균화하여 하나의 차선으로 만듦"""
-    #     if not lines:
-    #         return None
-    #     
-    #     # 기울기와 절편 계산
-    #     slopes = []
-    #     intercepts = []
-    #     
-    #     for x1, y1, x2, y2 in lines:
-    #         if (x2 - x1) == 0:
-    #             continue
-    #         
-    #         slope = (y2 - y1) / (x2 - x1)
-    #         intercept = y1 - slope * x1
-    #         
-    #         slopes.append(slope)
-    #         intercepts.append(intercept)
-    #     
-    #     if not slopes:
-    #         return None
-    #     
-    #     # 평균 계산
-    #     avg_slope = np.mean(slopes)
-    #     avg_intercept = np.mean(intercepts)
-    #     
-    #     # 차선의 시작점과 끝점 계산
-    #     if self.use_bird_view:
-    #         # Bird's Eye View에서는 변환된 이미지 크기 사용
-    #         y1 = self.warped_height
-    #         y2 = int(y1 * 0.6)
-    #         width_limit = self.warped_width
-    #     else:
-    #         y1 = self.roi_bottom - self.roi_top
-    #         y2 = int(y1 * 0.6)
-    #         width_limit = self.image_width
-    #     
-    #     x1 = int((y1 - avg_intercept) / avg_slope) if avg_slope != 0 else 0
-    #     x2 = int((y2 - avg_intercept) / avg_slope) if avg_slope != 0 else 0
-    #     
-    #     # 이미지 경계 내로 제한
-    #     x1 = max(0, min(width_limit - 1, x1))
-    #     x2 = max(0, min(width_limit - 1, x2))
-    #     
-    #     return np.array([[x1, y1, x2, y2]], dtype=np.int32)
+    # 레거시 코드 제거됨 (Hough 변환 방식 - 현재 사용 안 함)
+    # 색상 기반 방식으로 대체됨
     
     def _smooth_lane(self, current: np.ndarray, previous: np.ndarray) -> np.ndarray:
-        """이전 차선 정보와 스무딩"""
+        # 이전 차선 정보와 스무딩
         if previous is None:
             return current
         
@@ -371,12 +337,8 @@ class LaneDetector:
     def calculate_center(self, left_lane: Optional[np.ndarray], 
                         right_lane: Optional[np.ndarray],
                         center_lane: Optional[np.ndarray] = None) -> Optional[Tuple[int, int]]:
-        """
-        차선 중심점 계산 (중앙선 우선)
-        
-        Returns:
-            (center_x, center_y): 중심점 좌표
-        """
+        # 차선 중심점 계산 (중앙선 우선)
+        # Returns: (center_x, center_y): 중심점 좌표
         # 중앙선이 있으면 중앙선 기준
         if center_lane is not None:
             center_x = center_lane[0][0]
@@ -397,12 +359,8 @@ class LaneDetector:
         return (center_x, center_y)
     
     def calculate_offset(self, center_point: Optional[Tuple[int, int]]) -> float:
-        """
-        차선 중심으로부터의 오프셋 계산
-        
-        Returns:
-            offset: 픽셀 단위 오프셋 (음수: 왼쪽, 양수: 오른쪽)
-        """
+        # 차선 중심으로부터의 오프셋 계산
+        # Returns: offset: 픽셀 단위 오프셋 (음수: 왼쪽, 양수: 오른쪽)
         if center_point is None:
             return 0.0
         
@@ -416,12 +374,32 @@ class LaneDetector:
         
         return offset
     
+    def get_curve_info(self) -> Tuple[bool, Optional[float]]:
+        # 곡선 정보 반환
+        # Returns: (is_curve, curve_radius): 곡선 여부와 곡선 반경 (픽셀)
+        # 중앙선 곡선 반경 우선 사용
+        if self.center_lane_curve_radius is not None and self.center_lane_curve_radius < float('inf'):
+            return True, self.center_lane_curve_radius
+        
+        # 중앙선이 없으면 왼쪽/오른쪽 차선의 평균 곡선 반경 사용
+        curve_radii = []
+        if self.left_lane_curve_radius is not None and self.left_lane_curve_radius < float('inf'):
+            curve_radii.append(self.left_lane_curve_radius)
+        if self.right_lane_curve_radius is not None and self.right_lane_curve_radius < float('inf'):
+            curve_radii.append(self.right_lane_curve_radius)
+        
+        if curve_radii:
+            avg_radius = np.mean(curve_radii)
+            return True, avg_radius
+        
+        return False, None
+    
     def draw_lanes(self, frame: np.ndarray, 
                    left_lane: Optional[np.ndarray],
                    right_lane: Optional[np.ndarray],
                    center_point: Optional[Tuple[int, int]] = None,
                    center_lane: Optional[np.ndarray] = None) -> np.ndarray:
-        """차선 시각화 (중앙선 포함)"""
+        # 차선 시각화 (중앙선 포함)
         vis_frame = frame.copy()
         
         if self.use_bird_view and self.perspective_transform:

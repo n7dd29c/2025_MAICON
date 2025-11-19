@@ -77,9 +77,10 @@ class AutonomousController:
         self.turn_sensitivity = TURN_SENSITIVITY  # 조향 민감도
         self.deadzone = STEERING_DEADZONE  # 데드존
         
-    def calculate_steering(self, offset: float, image_width: int = 640, has_center_lane: bool = False) -> float:
+    def calculate_steering(self, offset: float, image_width: int = 640, has_center_lane: bool = False, 
+                          is_curve: bool = False, curve_radius: Optional[float] = None) -> float:
         """
-        조향 각도 계산 (PID 제어 + 스무딩)
+        조향 각도 계산 (PID 제어 + 스무딩 + 곡선 보정)
         
         Args:
             offset: 차선 중심으로부터의 오프셋 (픽셀)
@@ -87,6 +88,8 @@ class AutonomousController:
                    음수: 차선 중심이 왼쪽에 있음 -> 오른쪽으로 조향 필요
             image_width: 이미지 너비
             has_center_lane: 중앙선 감지 여부 (True면 더 강하게 반응)
+            is_curve: 곡선 구간 여부
+            curve_radius: 곡선 반경 (픽셀, 작을수록 급커브)
             
         Returns:
             steering_angle: 조향 각도 (-max_steering_angle ~ max_steering_angle)
@@ -108,8 +111,21 @@ class AutonomousController:
         target_offset = -normalized_offset
         
         # 중앙선이 있으면 KP 증가 (더 강한 반응)
-        from config import CENTER_LANE_KP_MULTIPLIER
+        from config import CENTER_LANE_KP_MULTIPLIER, CURVE_STEERING_MULTIPLIER
         effective_kp = self.kp * CENTER_LANE_KP_MULTIPLIER if has_center_lane else self.kp
+        
+        # 곡선 구간이면 조향 배율 적용
+        if is_curve and curve_radius is not None:
+            # 곡선 반경이 작을수록 (급커브) 더 강한 조향 필요
+            # 반경이 작으면 배율 증가, 반경이 크면 배율 감소
+            if curve_radius < image_width:  # 급커브
+                curve_multiplier = CURVE_STEERING_MULTIPLIER * 1.5
+            elif curve_radius < image_width * 2:  # 중간 커브
+                curve_multiplier = CURVE_STEERING_MULTIPLIER
+            else:  # 완만한 커브
+                curve_multiplier = CURVE_STEERING_MULTIPLIER * 0.8
+            
+            effective_kp *= curve_multiplier
         
         # 비례 제어
         p_term = effective_kp * target_offset
@@ -125,8 +141,14 @@ class AutonomousController:
                                 -self.max_steering_angle, 
                                 self.max_steering_angle)
         
-        # 조향 각도 스무딩 (중앙선이 있으면 덜 스무딩하여 빠르게 반응)
-        smoothing_factor = 0.5 if has_center_lane else 0.7  # 중앙선: 50% 유지, 일반: 70% 유지
+        # 조향 각도 스무딩 (곡선 구간에서는 덜 스무딩하여 빠르게 반응)
+        if is_curve:
+            smoothing_factor = 0.4  # 곡선: 40% 유지 (더 빠른 반응)
+        elif has_center_lane:
+            smoothing_factor = 0.5  # 중앙선: 50% 유지
+        else:
+            smoothing_factor = 0.7  # 일반: 70% 유지
+        
         steering_angle = (smoothing_factor * self.prev_steering_angle + 
                          (1 - smoothing_factor) * steering_angle)
         
@@ -215,6 +237,8 @@ class AutonomousController:
                            right_lane: Optional[np.ndarray] = None,
                            center_lane: Optional[np.ndarray] = None,
                            image_width: int = 640,
+                           is_curve: bool = False,
+                           curve_radius: Optional[float] = None,
                            avoidance_command: Optional[Dict] = None,
                            aruco_command: Optional[Dict] = None) -> dict:
         """
@@ -226,6 +250,8 @@ class AutonomousController:
             right_lane: 오른쪽 차선 정보
             center_lane: 중앙선 정보 (있으면 더 강하게 중앙 정렬)
             image_width: 이미지 너비
+            is_curve: 곡선 구간 여부
+            curve_radius: 곡선 반경 (픽셀)
             avoidance_command: 회피 명령 (최우선)
             aruco_command: ArUco 마커 명령 (2순위)
         
@@ -239,8 +265,9 @@ class AutonomousController:
             target_offset = avoidance_command.get('target_offset', offset)
             avoidance_speed = avoidance_command.get('speed', self.min_speed)
             
-            # 회피 목표 오프셋으로 조향 계산
-            steering_angle = self.calculate_steering(target_offset, image_width, has_center_lane)
+            # 회피 목표 오프셋으로 조향 계산 (곡선 정보 포함)
+            steering_angle = self.calculate_steering(target_offset, image_width, has_center_lane, 
+                                                   is_curve, curve_radius)
             speed = avoidance_speed
             
             # 회피 상태 메시지
@@ -288,8 +315,9 @@ class AutonomousController:
                     'aruco_mode': True
                 }
             else:
-                # go_straight는 차선 추종으로 처리
-                steering_angle = self.calculate_steering(offset, image_width, has_center_lane)
+                # go_straight는 차선 추종으로 처리 (곡선 정보 포함)
+                steering_angle = self.calculate_steering(offset, image_width, has_center_lane, 
+                                                        is_curve, curve_radius)
                 safety_message = "ArUco: 직진 (차선 추종)"
             
             return {
@@ -303,17 +331,19 @@ class AutonomousController:
             }
         
         # 정상 주행 모드
-        # 중앙선이 있으면 더 강하게 중앙 정렬
-        steering_angle = self.calculate_steering(offset, image_width, has_center_lane)
+        # 중앙선이 있으면 더 강하게 중앙 정렬 (곡선 정보 포함)
+        steering_angle = self.calculate_steering(offset, image_width, has_center_lane, 
+                                                is_curve, curve_radius)
         speed = self.calculate_speed(offset, left_lane, right_lane)
         is_safe, safety_message = self.check_safety(offset, left_lane, right_lane, image_width)
         
         # 차선 이탈 방지: 안전하지 않으면 강제 조정
         if not is_safe and abs(offset) > self.safe_offset_threshold:
-            # 차선 중심으로 강제 복귀 (중앙선이 있으면 더 강하게)
+            # 차선 중심으로 강제 복귀 (중앙선이 있으면 더 강하게, 곡선 정보 포함)
             correction_factor = 0.7 if has_center_lane else 0.5  # 중앙선: 70% 보정, 일반: 50% 보정
             correction_offset = -offset * correction_factor
-            steering_angle = self.calculate_steering(correction_offset, image_width, has_center_lane)
+            steering_angle = self.calculate_steering(correction_offset, image_width, has_center_lane,
+                                                    is_curve, curve_radius)
             speed = self.min_speed  # 감속
         
         return {

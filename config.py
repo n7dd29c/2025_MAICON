@@ -27,14 +27,19 @@ SAFE_OFFSET_THRESHOLD = 40  # 픽셀 (50 -> 40, 더 엄격한 기준)
 STEERING_DEADZONE = 3  # 픽셀 (5 -> 3, 중앙선 추종 민감도 향상)
 CENTER_LANE_KP_MULTIPLIER = 1.5  # 중앙선 감지 시 KP 배율 (더 강한 반응)
 
+# 곡선 주행 설정
+USE_CURVE_FITTING = True  # 곡선 피팅 사용 여부 (2차 다항식)
+CURVE_DETECTION_THRESHOLD = 0.01  # 곡선 감지 임계값 (2차 계수 절댓값)
+CURVE_STEERING_MULTIPLIER = 1.2  # 곡선 구간 조향 배율
+
 # 성능 설정
 SMOOTHING_FACTOR = 0.7  # 차선 스무딩 계수
 FRAME_SKIP = 1  # 프레임 스킵 (홀수/짝수 분리)
 
 # Bird's Eye View 설정
 USE_BIRD_VIEW = True  # Bird's Eye View 사용 여부
-BIRD_VIEW_TOP_WIDTH_RATIO = 0.8  # 상단 너비 비율 (0.6 -> 0.8, 카메라가 아래를 향하므로 더 넓게)
-BIRD_VIEW_BOTTOM_MARGIN_RATIO = 0.1  # 하단 여유 비율 (양쪽 10%)
+BIRD_VIEW_TOP_WIDTH_RATIO = 0.6  # 상단 너비 비율 (0.6 -> 0.8, 카메라가 아래를 향하므로 더 넓게)
+BIRD_VIEW_BOTTOM_MARGIN_RATIO = 0.2  # 하단 여유 비율 (양쪽 10%)
 BIRD_VIEW_TOP_OFFSET_RATIO = 0.05  # 상단 포인트 오프셋 (상단에서 5% 아래로, 0 -> 0.05)
 
 # 포트홀 감지 설정
