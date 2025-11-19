@@ -8,6 +8,7 @@ CAMERA_ID = 0
 IMAGE_WIDTH = 640
 IMAGE_HEIGHT = 480
 FPS_TARGET = 15
+USE_GSTREAMER = True  # Jetson Nano CSI 카메라 사용 시 True
 
 # 차선 인식 설정
 ROI_RATIO = 0.6  # ROI 비율 (하단 부분만 사용)
@@ -28,8 +29,17 @@ SAFE_OFFSET_THRESHOLD = 50  # 픽셀
 SMOOTHING_FACTOR = 0.7  # 차선 스무딩 계수
 FRAME_SKIP = 1  # 프레임 스킵 (홀수/짝수 분리)
 
-# 하드웨어 설정 (필요시)
-# MOTOR_PIN = 18
-# SERVO_PIN = 19
-# GPIO_MODE = "BCM"  # 또는 "BOARD"
+# Bird's Eye View 설정
+USE_BIRD_VIEW = True  # Bird's Eye View 사용 여부
+
+# 포트홀 감지 설정
+POTHOLE_MIN_AREA = 100  # 최소 포트홀 면적 (픽셀)
+POTHOLE_MAX_AREA = 50000  # 최대 포트홀 면적 (픽셀)
+POTHOLE_AVOIDANCE_MARGIN = 50  # 회피 안전 거리 (픽셀)
+POTHOLE_RETURN_THRESHOLD = 30  # 복귀 임계값 (픽셀)
+
+# 하드웨어 설정
+USE_TIKI = True  # TikiMini API 사용 여부
+MOTOR_MODE = "PID"  # "PWM" 또는 "PID"
+TURN_SENSITIVITY = 0.5  # 조향 민감도 (0.0 ~ 1.0)
 

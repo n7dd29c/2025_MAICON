@@ -1,10 +1,12 @@
 """
 차선 인식 모듈
 Jetson Nano 최적화된 차선 감지 시스템
+Bird's Eye View 적용
 """
 import cv2
 import numpy as np
 from typing import Tuple, Optional, List
+from perspective_transform import PerspectiveTransform
 
 
 class LaneDetector:
@@ -13,20 +15,37 @@ class LaneDetector:
     def __init__(self, 
                  image_width: int = 640,
                  image_height: int = 480,
-                 roi_ratio: float = 0.6):
+                 roi_ratio: float = 0.6,
+                 use_bird_view: bool = True):
         """
         Args:
             image_width: 처리할 이미지 너비
             image_height: 처리할 이미지 높이
             roi_ratio: 관심 영역(ROI) 비율 (하단 부분만 사용)
+            use_bird_view: Bird's Eye View 사용 여부
         """
         self.image_width = image_width
         self.image_height = image_height
         self.roi_ratio = roi_ratio
+        self.use_bird_view = use_bird_view
         
         # ROI 영역 계산 (하단 부분만 사용)
         self.roi_top = int(image_height * (1 - roi_ratio))
         self.roi_bottom = image_height
+        
+        # Bird's Eye View 변환기 초기화
+        if self.use_bird_view:
+            self.perspective_transform = PerspectiveTransform(
+                image_width=image_width,
+                image_height=image_height,
+                roi_ratio=roi_ratio
+            )
+            # 변환된 이미지 크기
+            self.warped_width, self.warped_height = self.perspective_transform.get_warped_size()
+        else:
+            self.perspective_transform = None
+            self.warped_width = image_width
+            self.warped_height = int(image_height * roi_ratio)
         
         # 차선 색상 범위 (HSV)
         self.white_lower = np.array([0, 0, 200])
@@ -41,13 +60,17 @@ class LaneDetector:
         self.smoothing_factor = 0.7
         
     def preprocess_image(self, frame: np.ndarray) -> np.ndarray:
-        """이미지 전처리"""
+        """이미지 전처리 (Bird's Eye View 변환 포함)"""
         # 리사이즈 (성능 향상)
         frame = cv2.resize(frame, (self.image_width, self.image_height))
         
-        # ROI 추출 (하단 부분만)
-        roi = frame[self.roi_top:self.roi_bottom, :]
+        # Bird's Eye View 변환
+        if self.use_bird_view and self.perspective_transform:
+            warped = self.perspective_transform.warp(frame)
+            return warped
         
+        # ROI 추출 (하단 부분만) - 변환 없이 사용
+        roi = frame[self.roi_top:self.roi_bottom, :]
         return roi
     
     def detect_lanes(self, frame: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
@@ -179,15 +202,22 @@ class LaneDetector:
         avg_intercept = np.mean(intercepts)
         
         # 차선의 시작점과 끝점 계산
-        y1 = self.roi_bottom - self.roi_top
-        y2 = int(y1 * 0.6)
+        if self.use_bird_view:
+            # Bird's Eye View에서는 변환된 이미지 크기 사용
+            y1 = self.warped_height
+            y2 = int(y1 * 0.6)
+            width_limit = self.warped_width
+        else:
+            y1 = self.roi_bottom - self.roi_top
+            y2 = int(y1 * 0.6)
+            width_limit = self.image_width
         
         x1 = int((y1 - avg_intercept) / avg_slope) if avg_slope != 0 else 0
         x2 = int((y2 - avg_intercept) / avg_slope) if avg_slope != 0 else 0
         
         # 이미지 경계 내로 제한
-        x1 = max(0, min(self.image_width - 1, x1))
-        x2 = max(0, min(self.image_width - 1, x2))
+        x1 = max(0, min(width_limit - 1, x1))
+        x2 = max(0, min(width_limit - 1, x2))
         
         return np.array([[x1, y1, x2, y2]], dtype=np.int32)
     
@@ -232,7 +262,12 @@ class LaneDetector:
         if center_point is None:
             return 0.0
         
-        image_center_x = self.image_width // 2
+        # Bird's Eye View 사용 시 변환된 이미지 기준
+        if self.use_bird_view:
+            image_center_x = self.warped_width // 2
+        else:
+            image_center_x = self.image_width // 2
+        
         offset = center_point[0] - image_center_x
         
         return offset
@@ -244,41 +279,91 @@ class LaneDetector:
         """차선 시각화"""
         vis_frame = frame.copy()
         
-        # ROI 영역 표시
-        cv2.rectangle(vis_frame, 
-                     (0, self.roi_top), 
-                     (self.image_width, self.roi_bottom),
-                     (0, 255, 0), 2)
-        
-        # 왼쪽 차선 그리기
-        if left_lane is not None:
-            x1, y1, x2, y2 = left_lane[0]
-            cv2.line(vis_frame, 
-                    (x1, y1 + self.roi_top), 
-                    (x2, y2 + self.roi_top),
-                    (255, 0, 0), 3)
-        
-        # 오른쪽 차선 그리기
-        if right_lane is not None:
-            x1, y1, x2, y2 = right_lane[0]
-            cv2.line(vis_frame, 
-                    (x1, y1 + self.roi_top), 
-                    (x2, y2 + self.roi_top),
-                    (0, 0, 255), 3)
-        
-        # 중심점 표시
-        if center_point is not None:
-            cx, cy = center_point
-            cv2.circle(vis_frame, 
-                      (cx, cy + self.roi_top), 
-                      5, (0, 255, 0), -1)
+        if self.use_bird_view and self.perspective_transform:
+            # Bird's Eye View에서 차선 그리기
+            # 변환된 이미지에 그리기
+            warped_vis = self.perspective_transform.warp(vis_frame)
             
-            # 이미지 중심선
-            image_center_x = self.image_width // 2
-            cv2.line(vis_frame,
-                    (image_center_x, self.roi_top),
-                    (image_center_x, self.roi_bottom),
-                    (255, 255, 0), 2)
+            # 왼쪽 차선 그리기
+            if left_lane is not None:
+                x1, y1, x2, y2 = left_lane[0]
+                cv2.line(warped_vis, 
+                        (x1, y1), 
+                        (x2, y2),
+                        (255, 0, 0), 3)
+            
+            # 오른쪽 차선 그리기
+            if right_lane is not None:
+                x1, y1, x2, y2 = right_lane[0]
+                cv2.line(warped_vis, 
+                        (x1, y1), 
+                        (x2, y2),
+                        (0, 0, 255), 3)
+            
+            # 중심점 표시
+            if center_point is not None:
+                cx, cy = center_point
+                cv2.circle(warped_vis, 
+                          (cx, cy), 
+                          5, (0, 255, 0), -1)
+                
+                # 이미지 중심선
+                image_center_x = self.warped_width // 2
+                cv2.line(warped_vis,
+                        (image_center_x, 0),
+                        (image_center_x, self.warped_height),
+                        (255, 255, 0), 2)
+            
+            # 원본 뷰로 역변환
+            unwarped = self.perspective_transform.unwarp(warped_vis)
+            
+            # 원본 프레임에 오버레이
+            roi = vis_frame[self.roi_top:self.roi_bottom, :]
+            roi = cv2.addWeighted(roi, 0.6, unwarped, 0.4, 0)
+            vis_frame[self.roi_top:self.roi_bottom, :] = roi
+            
+            # ROI 영역 표시
+            cv2.rectangle(vis_frame, 
+                         (0, self.roi_top), 
+                         (self.image_width, self.roi_bottom),
+                         (0, 255, 0), 2)
+        else:
+            # 기존 방식 (변환 없이)
+            # ROI 영역 표시
+            cv2.rectangle(vis_frame, 
+                         (0, self.roi_top), 
+                         (self.image_width, self.roi_bottom),
+                         (0, 255, 0), 2)
+            
+            # 왼쪽 차선 그리기
+            if left_lane is not None:
+                x1, y1, x2, y2 = left_lane[0]
+                cv2.line(vis_frame, 
+                        (x1, y1 + self.roi_top), 
+                        (x2, y2 + self.roi_top),
+                        (255, 0, 0), 3)
+            
+            # 오른쪽 차선 그리기
+            if right_lane is not None:
+                x1, y1, x2, y2 = right_lane[0]
+                cv2.line(vis_frame, 
+                        (x1, y1 + self.roi_top), 
+                        (x2, y2 + self.roi_top),
+                        (0, 0, 255), 3)
+            
+            # 중심점 표시
+            if center_point is not None:
+                cx, cy = center_point
+                cv2.circle(vis_frame, 
+                          (cx, cy + self.roi_top), 
+                          5, (0, 255, 0), -1)
+                
+                # 이미지 중심선
+                image_center_x = self.image_width // 2
+                cv2.line(vis_frame,
+                        (image_center_x, self.roi_top),
+                        (image_center_x, self.roi_bottom),
+                        (255, 255, 0), 2)
         
         return vis_frame
 

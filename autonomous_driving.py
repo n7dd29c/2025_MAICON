@@ -1,6 +1,7 @@
 """
 자율주행 메인 실행 파일
 홀수 프레임에서 차선 인식 및 자율주행 제어 수행
+짝수 프레임에서 포트홀 감지 및 회피 계획
 """
 import cv2
 import time
@@ -9,6 +10,9 @@ import numpy as np
 from typing import Optional
 from lane_detector import LaneDetector
 from autonomous_control import AutonomousController
+from object_detector import ObjectDetector
+from avoidance_planner import AvoidancePlanner
+from config import USE_BIRD_VIEW, USE_GSTREAMER
 
 
 class AutonomousDriving:
@@ -34,14 +38,31 @@ class AutonomousDriving:
         # 차선 인식기 초기화
         self.lane_detector = LaneDetector(
             image_width=image_width,
-            image_height=image_height
+            image_height=image_height,
+            use_bird_view=USE_BIRD_VIEW
         )
         
         # 제어기 초기화
+        from config import USE_TIKI, MOTOR_MODE
         self.controller = AutonomousController(
             max_steering_angle=30.0,
             kp=0.5,
-            kd=0.1
+            kd=0.1,
+            use_tiki=USE_TIKI,
+            motor_mode=MOTOR_MODE
+        )
+        
+        # 객체 디텍터 초기화 (포트홀 감지)
+        self.object_detector = ObjectDetector(
+            image_width=image_width,
+            image_height=image_height,
+            use_bird_view=USE_BIRD_VIEW
+        )
+        
+        # 회피 계획기 초기화
+        self.avoidance_planner = AvoidancePlanner(
+            image_width=image_width,
+            image_height=image_height
         )
         
         # 카메라 초기화
@@ -53,54 +74,146 @@ class AutonomousDriving:
         # 성능 측정
         self.fps_history = []
         
-    def initialize_camera(self) -> bool:
-        """카메라 초기화"""
-        self.cap = cv2.VideoCapture(self.camera_id)
+        # 차선 정보 저장 (회피 계획에 사용)
+        self.last_left_lane = None
+        self.last_right_lane = None
+        self.last_offset = 0.0
+        
+        # 회피 명령 저장
+        self.current_avoidance_command = None
+        
+    def initialize_camera(self, use_gstreamer: bool = True) -> bool:
+        """
+        카메라 초기화
+        Jetson Nano CSI 카메라의 경우 GStreamer 파이프라인 사용
+        """
+        if use_gstreamer:
+            # Jetson Nano CSI 카메라용 GStreamer 파이프라인
+            pipeline = (
+                f"nvarguscamerasrc ! video/x-raw(memory:NVMM), "
+                f"width={self.image_width}, height={self.image_height}, "
+                f"format=NV12, framerate={self.fps_target}/1 ! "
+                "nvvidconv ! video/x-raw, format=BGRx ! "
+                "videoconvert ! video/x-raw, format=BGR ! appsink"
+            )
+            
+            self.cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+        else:
+            # 일반 USB 카메라
+            self.cap = cv2.VideoCapture(self.camera_id)
+            
+            if self.cap.isOpened():
+                # 카메라 설정
+                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.image_width)
+                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.image_height)
+                self.cap.set(cv2.CAP_PROP_FPS, self.fps_target)
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 버퍼 크기 최소화
         
         if not self.cap.isOpened():
-            print(f"카메라 {self.camera_id}를 열 수 없습니다.")
+            print(f"카메라를 열 수 없습니다. (GStreamer: {use_gstreamer})")
             return False
         
-        # 카메라 설정
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.image_width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.image_height)
-        self.cap.set(cv2.CAP_PROP_FPS, self.fps_target)
-        
-        # Jetson Nano 최적화
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 버퍼 크기 최소화
-        
-        print(f"카메라 초기화 완료: {self.image_width}x{self.image_height}")
+        print(f"카메라 초기화 완료: {self.image_width}x{self.image_height} (GStreamer: {use_gstreamer})")
         return True
     
     def process_frame(self, frame: np.ndarray) -> tuple:
         """
-        프레임 처리 (홀수 프레임만 처리)
+        프레임 처리
+        - 홀수 프레임: 차선 인식 및 자율주행 제어
+        - 짝수 프레임: 포트홀 감지 및 회피 계획
         
         Returns:
             (processed_frame, control_command): 처리된 프레임과 제어 명령
         """
         self.frame_count += 1
         
-        # 홀수 프레임만 처리
+        # 짝수 프레임: 포트홀 감지 및 회피 계획
         if self.frame_count % 2 == 0:
-            # 짝수 프레임은 스킵 (객체 디텍션용)
-            return frame, None
+            # 포트홀 감지
+            potholes = self.object_detector.detect_potholes(frame)
+            
+            # 주행 경로에 있는 포트홀 찾기
+            pothole_in_path = None
+            for pothole in potholes:
+                if self.object_detector.is_pothole_in_path(
+                    pothole, self.last_left_lane, self.last_right_lane, self.image_width
+                ):
+                    pothole_in_path = pothole
+                    break
+            
+            # 회피 계획
+            if pothole_in_path is not None:
+                # 회피 시작
+                self.current_avoidance_command = self.avoidance_planner.plan_avoidance(
+                    pothole_in_path,
+                    self.last_left_lane,
+                    self.last_right_lane,
+                    self.last_offset
+                )
+            else:
+                # 복귀 조건 확인
+                if self.avoidance_planner.check_return_condition(
+                    self.last_offset,
+                    self.last_left_lane,
+                    self.last_right_lane
+                ):
+                    # 차선 복귀
+                    self.current_avoidance_command = self.avoidance_planner.plan_return(
+                        self.last_offset,
+                        self.last_left_lane,
+                        self.last_right_lane
+                    )
+                else:
+                    # 정상 주행
+                    self.current_avoidance_command = {'action': 'normal'}
+            
+            # 시각화
+            vis_frame = self.object_detector.draw_potholes(
+                frame, potholes, in_path_only=True,
+                left_lane=self.last_left_lane,
+                right_lane=self.last_right_lane
+            )
+            
+            # 차선 정보도 표시 (참고용)
+            if self.last_left_lane is not None and self.last_right_lane is not None:
+                center_point = self.lane_detector.calculate_center(
+                    self.last_left_lane, self.last_right_lane
+                )
+                vis_frame = self.lane_detector.draw_lanes(
+                    vis_frame, self.last_left_lane, self.last_right_lane, center_point
+                )
+            
+            # 회피 정보 표시
+            if self.current_avoidance_command and self.current_avoidance_command.get('action') != 'normal':
+                action = self.current_avoidance_command.get('action', 'normal')
+                cv2.putText(vis_frame, f"회피 모드: {action}",
+                           (10, self.image_height - 50),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            
+            return vis_frame, None
         
+        # 홀수 프레임: 차선 인식 및 자율주행 제어
         # 차선 감지
         left_lane, right_lane = self.lane_detector.detect_lanes(frame)
+        
+        # 차선 정보 저장 (회피 계획에 사용)
+        self.last_left_lane = left_lane
+        self.last_right_lane = right_lane
         
         # 중심점 계산
         center_point = self.lane_detector.calculate_center(left_lane, right_lane)
         
         # 오프셋 계산
         offset = self.lane_detector.calculate_offset(center_point)
+        self.last_offset = offset
         
-        # 제어 명령 생성
+        # 제어 명령 생성 (회피 명령 포함)
         control_command = self.controller.get_control_command(
             offset=offset,
             left_lane=left_lane,
             right_lane=right_lane,
-            image_width=self.image_width
+            image_width=self.image_width,
+            avoidance_command=self.current_avoidance_command
         )
         
         # 시각화
@@ -147,22 +260,21 @@ class AutonomousDriving:
         if control_command is None:
             return
         
-        # 여기에 실제 모터/서보 제어 코드 추가
-        # 예: GPIO, PWM, 시리얼 통신 등
         steering_angle = control_command['steering_angle']
         speed = control_command['speed']
         
-        # 디버그 출력
+        # 안전하지 않으면 정지
         if not control_command['is_safe']:
             print(f"경고: {control_command['safety_message']}")
+            self.controller.stop_motors()
+            return
         
-        # 실제 하드웨어 제어는 여기에 구현
-        # self.motor_controller.set_steering(steering_angle)
-        # self.motor_controller.set_speed(speed)
+        # TikiMini API로 모터 제어
+        self.controller.execute_motor_control(steering_angle, speed)
     
     def run(self, show_preview: bool = True, save_video: bool = False):
         """메인 실행 루프"""
-        if not self.initialize_camera():
+        if not self.initialize_camera(use_gstreamer=USE_GSTREAMER):
             return
         
         # 비디오 저장 설정
@@ -230,6 +342,9 @@ class AutonomousDriving:
             print("\n사용자에 의해 중단됨")
         
         finally:
+            # 모터 정지
+            self.controller.stop_motors()
+            
             # 정리
             if self.cap:
                 self.cap.release()
