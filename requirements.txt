@@ -15,3 +15,7 @@ numpy>=1.24.0
 # 유틸리티
 # Pillow>=10.0.0  # 이미지 처리 (선택사항)
 
+# YOLO 추론 (ONNX Runtime)
+onnxruntime>=1.15.0  # Jetson Nano는 CPU 버전 사용 (ARM64용 GPU 버전은 PyPI에 없음)
+# 참고: Jetson Nano에서 pip install onnxruntime 로 설치
+

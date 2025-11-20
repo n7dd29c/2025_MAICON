@@ -78,7 +78,8 @@ class AutonomousController:
         self.deadzone = STEERING_DEADZONE  # 데드존
         
     def calculate_steering(self, offset: float, image_width: int = 640, has_center_lane: bool = False, 
-                          is_curve: bool = False, curve_radius: Optional[float] = None) -> float:
+                          is_curve: bool = False, curve_radius: Optional[float] = None, 
+                          curve_direction: Optional[float] = None) -> float:
         """
         조향 각도 계산 (PID 제어 + 스무딩 + 곡선 보정)
         
@@ -114,18 +115,41 @@ class AutonomousController:
         from config import CENTER_LANE_KP_MULTIPLIER, CURVE_STEERING_MULTIPLIER
         effective_kp = self.kp * CENTER_LANE_KP_MULTIPLIER if has_center_lane else self.kp
         
-        # 곡선 구간이면 조향 배율 적용
+        # 곡선 구간이면 조향 배율 적용 및 선행 보정
         if is_curve and curve_radius is not None:
             # 곡선 반경이 작을수록 (급커브) 더 강한 조향 필요
             # 반경이 작으면 배율 증가, 반경이 크면 배율 감소
-            if curve_radius < image_width:  # 급커브
+            if curve_radius < image_width * 0.8:  # 급커브
+                curve_multiplier = CURVE_STEERING_MULTIPLIER * 1.8
+            elif curve_radius < image_width * 1.5:  # 중간 커브
                 curve_multiplier = CURVE_STEERING_MULTIPLIER * 1.5
-            elif curve_radius < image_width * 2:  # 중간 커브
+            elif curve_radius < image_width * 2.5:  # 완만한 커브
                 curve_multiplier = CURVE_STEERING_MULTIPLIER
-            else:  # 완만한 커브
-                curve_multiplier = CURVE_STEERING_MULTIPLIER * 0.8
+            else:  # 매우 완만한 커브
+                curve_multiplier = CURVE_STEERING_MULTIPLIER * 0.9
             
             effective_kp *= curve_multiplier
+            
+            # 곡선 방향 정보를 활용한 선행 보정
+            if curve_direction is not None:
+                # 곡선 방향에 따른 선행 조향 보정
+                # curve_direction: -1 (왼쪽 곡선), +1 (오른쪽 곡선)
+                # 왼쪽 곡선이면 왼쪽으로 미리 조향 (음수), 오른쪽 곡선이면 오른쪽으로 미리 조향 (양수)
+                # 반경이 작을수록 더 강한 선행 보정
+                if curve_radius < image_width * 1.5:
+                    # 급커브: 최대 조향 각도의 15~25% 선행 보정
+                    anticipatory_steering = curve_direction * self.max_steering_angle * 0.2
+                elif curve_radius < image_width * 2.5:
+                    # 중간 커브: 최대 조향 각도의 8~15% 선행 보정
+                    anticipatory_steering = curve_direction * self.max_steering_angle * 0.12
+                else:
+                    # 완만한 커브: 최대 조향 각도의 5% 선행 보정
+                    anticipatory_steering = curve_direction * self.max_steering_angle * 0.05
+                
+                # 선행 보정을 target_offset에 반영
+                # 곡선 방향으로 미리 조향하기 위해 offset에 보정값 추가
+                anticipatory_offset = anticipatory_steering / self.max_steering_angle * (image_width / 2)
+                target_offset += anticipatory_offset
         
         # 비례 제어
         p_term = effective_kp * target_offset
@@ -239,6 +263,7 @@ class AutonomousController:
                            image_width: int = 640,
                            is_curve: bool = False,
                            curve_radius: Optional[float] = None,
+                           curve_direction: Optional[float] = None,
                            avoidance_command: Optional[Dict] = None,
                            aruco_command: Optional[Dict] = None) -> dict:
         """
@@ -267,7 +292,7 @@ class AutonomousController:
             
             # 회피 목표 오프셋으로 조향 계산 (곡선 정보 포함)
             steering_angle = self.calculate_steering(target_offset, image_width, has_center_lane, 
-                                                   is_curve, curve_radius)
+                                                   is_curve, curve_radius, curve_direction)
             speed = avoidance_speed
             
             # 회피 상태 메시지
@@ -317,7 +342,7 @@ class AutonomousController:
             else:
                 # go_straight는 차선 추종으로 처리 (곡선 정보 포함)
                 steering_angle = self.calculate_steering(offset, image_width, has_center_lane, 
-                                                        is_curve, curve_radius)
+                                                        is_curve, curve_radius, curve_direction)
                 safety_message = "ArUco: 직진 (차선 추종)"
             
             return {
@@ -331,11 +356,25 @@ class AutonomousController:
             }
         
         # 정상 주행 모드
+        # 차선 안전성 검사 먼저 수행
+        is_safe, safety_message = self.check_safety(offset, left_lane, right_lane, image_width)
+        
+        # 차선 미감지 시 정지
+        if not is_safe and '차선 미감지' in safety_message:
+            return {
+                'steering_angle': 0.0,
+                'speed': 0.0,
+                'is_safe': False,
+                'safety_message': safety_message,
+                'offset': offset,
+                'avoidance_mode': False,
+                'aruco_mode': False
+            }
+        
         # 중앙선이 있으면 더 강하게 중앙 정렬 (곡선 정보 포함)
         steering_angle = self.calculate_steering(offset, image_width, has_center_lane, 
-                                                is_curve, curve_radius)
+                                                is_curve, curve_radius, curve_direction)
         speed = self.calculate_speed(offset, left_lane, right_lane)
-        is_safe, safety_message = self.check_safety(offset, left_lane, right_lane, image_width)
         
         # 차선 이탈 방지: 안전하지 않으면 강제 조정
         if not is_safe and abs(offset) > self.safe_offset_threshold:
@@ -343,7 +382,7 @@ class AutonomousController:
             correction_factor = 0.7 if has_center_lane else 0.5  # 중앙선: 70% 보정, 일반: 50% 보정
             correction_offset = -offset * correction_factor
             steering_angle = self.calculate_steering(correction_offset, image_width, has_center_lane,
-                                                    is_curve, curve_radius)
+                                                    is_curve, curve_radius, curve_direction)
             speed = self.min_speed  # 감속
         
         return {
@@ -414,4 +453,56 @@ class AutonomousController:
                 self.tiki.stop()
             except Exception as e:
                 print(f"모터 정지 오류: {e}")
+    
+    def set_led(self, color: str = "off"):
+        """
+        LED 제어
+        
+        Args:
+            color: LED 색상 ("red", "green", "blue", "yellow", "off")
+        """
+        if not self.use_tiki or self.tiki is None:
+            return
+        
+        try:
+            # TikiMini API의 LED 제어 메서드 호출
+            # API에 따라 메서드 이름이 다를 수 있음
+            if hasattr(self.tiki, 'set_led'):
+                # 색상 매핑
+                color_map = {
+                    "red": self.tiki.LED_RED if hasattr(self.tiki, 'LED_RED') else 1,
+                    "green": self.tiki.LED_GREEN if hasattr(self.tiki, 'LED_GREEN') else 2,
+                    "blue": self.tiki.LED_BLUE if hasattr(self.tiki, 'LED_BLUE') else 3,
+                    "yellow": self.tiki.LED_YELLOW if hasattr(self.tiki, 'LED_YELLOW') else 4,
+                    "off": 0
+                }
+                led_value = color_map.get(color.lower(), 0)
+                self.tiki.set_led(led_value)
+            elif hasattr(self.tiki, 'set_led_color'):
+                self.tiki.set_led_color(color)
+            elif hasattr(self.tiki, 'led'):
+                # 속성으로 접근하는 경우
+                self.tiki.led = color
+            else:
+                # 기본 시도: 직접 메서드 호출
+                try:
+                    if color.lower() == "off":
+                        self.tiki.led_off()
+                    else:
+                        method_name = f"led_{color.lower()}"
+                        if hasattr(self.tiki, method_name):
+                            getattr(self.tiki, method_name)()
+                except:
+                    pass
+        except Exception as e:
+            print(f"LED 제어 오류: {e}")
+    
+    def set_led_from_config(self):
+        """config.py의 QR_LED_COLOR 설정값으로 LED 제어"""
+        from config import QR_LED_COLOR
+        self.set_led(QR_LED_COLOR)
+    
+    def set_led_off(self):
+        """LED 끄기"""
+        self.set_led("off")
 

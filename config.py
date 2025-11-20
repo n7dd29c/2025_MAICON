@@ -29,8 +29,8 @@ CENTER_LANE_KP_MULTIPLIER = 1.5  # 중앙선 감지 시 KP 배율 (더 강한 �
 
 # 곡선 주행 설정
 USE_CURVE_FITTING = True  # 곡선 피팅 사용 여부 (2차 다항식)
-CURVE_DETECTION_THRESHOLD = 0.01  # 곡선 감지 임계값 (2차 계수 절댓값)
-CURVE_STEERING_MULTIPLIER = 1.2  # 곡선 구간 조향 배율
+CURVE_DETECTION_THRESHOLD = 0.005  # 곡선 감지 임계값 (2차 계수 절댓값, 낮을수록 민감)
+CURVE_STEERING_MULTIPLIER = 1.5  # 곡선 구간 조향 배율 (증가)
 
 # 성능 설정
 SMOOTHING_FACTOR = 0.7  # 차선 스무딩 계수
@@ -55,20 +55,22 @@ TURN_SENSITIVITY = 0.5  # 조향 민감도 (0.0 ~ 1.0)
 
 # YOLO 객체 탐지 설정
 USE_YOLO = True  # YOLO 사용 여부 (False면 전통적인 CV 방법 사용)
-YOLO_ENGINE_PATH = "yolo/Object7.v7-maicon_mortar_background.yolov8/yolov8n/weights/best.trt"  # TensorRT 엔진 경로
+YOLO_MODEL_PATH = "yolo/Object7.v7-maicon_mortar_background.yolov8/yolov8n18/weights/best.onnx"  # ONNX 모델 경로
 YOLO_CONF_THRESHOLD = 0.25  # 신뢰도 임계값
 YOLO_IOU_THRESHOLD = 0.45  # NMS IoU 임계값
-YOLO_CLASS_NAMES = ["unknown"]  # TODO: 실제 학습된 클래스 목록으로 변경
+YOLO_CLASS_NAMES = ["Hazmat", "Missile", "Enemy", "Tank", "Car", "Mortar", "Box"]  # TODO: 실제 학습된 클래스 목록으로 변경
 YOLO_AVOIDANCE_CLASSES = []  # 회피가 필요한 객체 클래스
 YOLO_DISPLAY_ONLY_CLASSES = []  # 표시만 하는 객체 클래스
 
 # ArUco 마커 설정
-USE_ARUCO = False  # ArUco 마커 사용 여부
+USE_ARUCO = True  # ArUco 마커 사용 여부
 ARUCO_DICTIONARY = 8  # cv2.aruco.DICT_6X6_50 (8) - 회전된 마커 감지 개선
 ARUCO_TURN_ANGLE = 25.0  # 회전 각도 (도)
 ARUCO_TURN_DURATION = 2.0  # 회전 지속 시간 (초)
 ARUCO_TURN_SPEED = 0.4  # 회전 시 속도 (0.0 ~ 1.0)
 
-# QR 코드 설정 (추후 구현)
-USE_QR = False  # QR 코드 인식 사용 여부
+# QR 코드 설정
+USE_QR = True  # QR 코드 인식 사용 여부
+QR_LED_COLOR = "green"  # QR 코드 인식 시 LED 색상 ("red", "green", "blue", "yellow", "off")
+QR_LED_DURATION = 1.0  # LED 점등 지속 시간 (초)
 

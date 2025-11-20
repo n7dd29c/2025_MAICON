@@ -61,6 +61,9 @@ class LaneDetector:
         self.left_lane_curve_radius = None
         self.right_lane_curve_radius = None
         self.center_lane_curve_radius = None
+        self.left_lane_curve_direction = None  # -1: 왼쪽 곡선, +1: 오른쪽 곡선
+        self.right_lane_curve_direction = None
+        self.center_lane_curve_direction = None
         self.is_curve = False
         
         # 곡선 피팅 설정
@@ -261,24 +264,38 @@ class LaneDetector:
                 is_curve = abs(a) > CURVE_DETECTION_THRESHOLD
                 
                 if is_curve:
-                    # 곡선 반경 계산 (하단 지점에서)
+                    # 곡선 방향 감지: 2차 계수 a의 부호로 판단
+                    # a > 0: 오른쪽으로 휘는 곡선 (왼쪽 곡선) -> -1
+                    # a < 0: 왼쪽으로 휘는 곡선 (오른쪽 곡선) -> +1
+                    curve_direction = -1.0 if a > 0 else 1.0
+                    
+                    # 곡선 반경 계산 개선 (중간 지점과 하단 지점의 평균 사용)
                     y_bottom = mask_height - 1
-                    # 곡선의 곡률: k = |f''(y)| / (1 + f'(y)^2)^(3/2)
-                    # f(y) = ay^2 + by + c
-                    # f'(y) = 2ay + b
-                    # f''(y) = 2a
-                    dy_dx = 2 * a * y_bottom + b
+                    y_mid = mask_height // 2
+                    
+                    # 하단 지점에서의 곡률
+                    dy_dx_bottom = 2 * a * y_bottom + b
                     d2y_dx2 = 2 * a
-                    curvature = abs(d2y_dx2) / ((1 + dy_dx**2)**1.5)
-                    curve_radius = 1.0 / curvature if curvature > 0 else float('inf')
+                    curvature_bottom = abs(d2y_dx2) / ((1 + dy_dx_bottom**2)**1.5)
+                    
+                    # 중간 지점에서의 곡률
+                    dy_dx_mid = 2 * a * y_mid + b
+                    curvature_mid = abs(d2y_dx2) / ((1 + dy_dx_mid**2)**1.5)
+                    
+                    # 평균 곡률 사용 (더 정확한 반경 계산)
+                    avg_curvature = (curvature_bottom + curvature_mid) / 2.0
+                    curve_radius = 1.0 / avg_curvature if avg_curvature > 0 else float('inf')
                     
                     # 곡선 정보 저장 (나중에 조향 계산에 사용)
                     if is_center:
                         self.center_lane_curve_radius = curve_radius
+                        self.center_lane_curve_direction = curve_direction
                     elif is_left:
                         self.left_lane_curve_radius = curve_radius
+                        self.left_lane_curve_direction = curve_direction
                     else:
                         self.right_lane_curve_radius = curve_radius
+                        self.right_lane_curve_direction = curve_direction
                     
                     # 곡선을 여러 점으로 표현 (시각화 및 조향 계산용)
                     y1 = mask_height - 1  # 하단
@@ -374,25 +391,34 @@ class LaneDetector:
         
         return offset
     
-    def get_curve_info(self) -> Tuple[bool, Optional[float]]:
+    def get_curve_info(self) -> Tuple[bool, Optional[float], Optional[float]]:
         # 곡선 정보 반환
-        # Returns: (is_curve, curve_radius): 곡선 여부와 곡선 반경 (픽셀)
+        # Returns: (is_curve, curve_radius, curve_direction): 
+        #   - 곡선 여부
+        #   - 곡선 반경 (픽셀)
+        #   - 곡선 방향 (-1: 왼쪽 곡선, +1: 오른쪽 곡선, None: 방향 불명)
         # 중앙선 곡선 반경 우선 사용
         if self.center_lane_curve_radius is not None and self.center_lane_curve_radius < float('inf'):
-            return True, self.center_lane_curve_radius
+            return True, self.center_lane_curve_radius, self.center_lane_curve_direction
         
         # 중앙선이 없으면 왼쪽/오른쪽 차선의 평균 곡선 반경 사용
         curve_radii = []
+        curve_directions = []
         if self.left_lane_curve_radius is not None and self.left_lane_curve_radius < float('inf'):
             curve_radii.append(self.left_lane_curve_radius)
+            if self.left_lane_curve_direction is not None:
+                curve_directions.append(self.left_lane_curve_direction)
         if self.right_lane_curve_radius is not None and self.right_lane_curve_radius < float('inf'):
             curve_radii.append(self.right_lane_curve_radius)
+            if self.right_lane_curve_direction is not None:
+                curve_directions.append(self.right_lane_curve_direction)
         
         if curve_radii:
             avg_radius = np.mean(curve_radii)
-            return True, avg_radius
+            avg_direction = np.mean(curve_directions) if curve_directions else None
+            return True, avg_radius, avg_direction
         
-        return False, None
+        return False, None, None
     
     def draw_lanes(self, frame: np.ndarray, 
                    left_lane: Optional[np.ndarray],

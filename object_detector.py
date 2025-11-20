@@ -9,13 +9,28 @@ from typing import List, Optional, Tuple, Dict
 from config import *
 from perspective_transform import PerspectiveTransform
 
-# YOLO TensorRT 추론 (선택적)
+# YOLO 관련 설정 명시적 import (호환성)
 try:
-    from yolo_inference import YOLOTensorRT
-    YOLO_AVAILABLE = True
+    from config import YOLO_MODEL_PATH
 except ImportError:
+    # config.py에 없으면 기본값 사용
+    YOLO_MODEL_PATH = "yolo/Object7.v7-maicon_mortar_background.yolov8/yolov8n/weights/best.onnx"
+
+# YOLO ONNX Runtime 추론 (선택적)
+YOLO_AVAILABLE = False
+try:
+    import onnxruntime as ort
+    from yolo_inference import YOLOONNX
+    YOLO_AVAILABLE = True
+except ImportError as e:
     YOLO_AVAILABLE = False
-    print("경고: YOLO 추론 모듈을 사용할 수 없습니다. 전통적인 CV 방법을 사용합니다.")
+    print(f"경고: YOLO 추론 모듈을 사용할 수 없습니다. 전통적인 CV 방법을 사용합니다.")
+    print(f"  오류: {e}")
+    print(f"  설치: pip install onnxruntime")
+except Exception as e:
+    YOLO_AVAILABLE = False
+    print(f"경고: YOLO 추론 모듈 로드 실패: {e}")
+    print(f"  전통적인 CV 방법을 사용합니다.")
 
 
 class ObjectDetector:
@@ -86,15 +101,22 @@ class ObjectDetector:
         
         if self.use_yolo:
             try:
-                engine_path = YOLO_ENGINE_PATH
+                # YOLO_MODEL_PATH 가져오기 (명시적 import)
+                try:
+                    from config import YOLO_MODEL_PATH
+                except ImportError:
+                    # config.py에 없으면 기본값 사용
+                    YOLO_MODEL_PATH = "yolo/Object7.v7-maicon_mortar_background.yolov8/yolov8n/weights/best.onnx"
+                
+                model_path = YOLO_MODEL_PATH
                 
                 # 여러 경로 시도
                 possible_paths = [
-                    engine_path,  # 원본 경로
-                    os.path.join(os.path.dirname(__file__), engine_path),  # 현재 디렉토리 기준
-                    os.path.join(os.path.dirname(__file__), '..', engine_path),  # 상위 디렉토리
-                    os.path.abspath(engine_path),  # 절대 경로
-                    os.path.join(os.getcwd(), engine_path),  # 작업 디렉토리 기준
+                    model_path,  # 원본 경로
+                    os.path.join(os.path.dirname(__file__), model_path),  # 현재 디렉토리 기준
+                    os.path.join(os.path.dirname(__file__), '..', model_path),  # 상위 디렉토리
+                    os.path.abspath(model_path),  # 절대 경로
+                    os.path.join(os.getcwd(), model_path),  # 작업 디렉토리 기준
                 ]
                 
                 found_path = None
@@ -105,25 +127,37 @@ class ObjectDetector:
                         break
                 
                 if found_path:
-                    self.yolo_model = YOLOTensorRT(
-                        engine_path=found_path,
-                        conf_threshold=YOLO_CONF_THRESHOLD,
-                        iou_threshold=YOLO_IOU_THRESHOLD
-                    )
-                    print(f"YOLO 모델 로드 완료: {found_path}")
-                    print(f"감지 가능한 클래스: {self.class_names}")
-                    print(f"회피 대상 클래스: {self.avoidance_classes}")
+                    try:
+                        self.yolo_model = YOLOONNX(
+                            onnx_path=found_path,
+                            conf_threshold=YOLO_CONF_THRESHOLD,
+                            iou_threshold=YOLO_IOU_THRESHOLD
+                        )
+                        print(f"✓ YOLO 모델 로드 완료: {found_path}")
+                        print(f"  감지 가능한 클래스: {self.class_names}")
+                        print(f"  회피 대상 클래스: {self.avoidance_classes}")
+                    except Exception as e:
+                        print(f"✗ YOLO 모델 초기화 실패: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        print("전통적인 CV 방법을 사용합니다.")
+                        self.use_yolo = False
+                        self.yolo_model = None
                 else:
-                    print(f"경고: YOLO 엔진 파일을 찾을 수 없습니다.")
+                    print(f"경고: YOLO ONNX 파일을 찾을 수 없습니다.")
                     print(f"  시도한 경로:")
                     for path in possible_paths:
                         print(f"    - {os.path.normpath(path)}")
                     print("전통적인 CV 방법을 사용합니다.")
                     self.use_yolo = False
+                    self.yolo_model = None
             except Exception as e:
                 print(f"YOLO 초기화 실패: {e}")
+                import traceback
+                traceback.print_exc()
                 print("전통적인 CV 방법을 사용합니다.")
                 self.use_yolo = False
+                self.yolo_model = None
         
     def detect_objects(self, frame: np.ndarray) -> Tuple[List[Dict], List[Dict]]:
         """

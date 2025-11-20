@@ -15,7 +15,8 @@ from autonomous_control import AutonomousController
 from object_detector import ObjectDetector
 from avoidance_planner import AvoidancePlanner
 from aruco_detector import ArUcoDetector
-from config import USE_BIRD_VIEW, USE_GSTREAMER, USE_ARUCO
+from qr_detector import QRDetector
+from config import USE_BIRD_VIEW, USE_GSTREAMER, USE_ARUCO, USE_QR
 
 
 class AutonomousDriving:
@@ -75,6 +76,12 @@ class AutonomousDriving:
         else:
             self.aruco_detector = None
         
+        # QR 코드 감지기 초기화
+        if USE_QR:
+            self.qr_detector = QRDetector()
+        else:
+            self.qr_detector = None
+        
         # 카메라 초기화
         self.cap: Optional[cv2.VideoCapture] = None
         
@@ -96,6 +103,10 @@ class AutonomousDriving:
         self.current_aruco_command = None
         self.aruco_command_start_time = None
         self.aruco_command_duration = 0.0
+        
+        # QR 코드 감지 상태
+        self.last_qr_data = None
+        self.qr_led_start_time = None
         
     def initialize_camera(self, use_gstreamer: bool = True) -> bool:
         """
@@ -259,11 +270,33 @@ class AutonomousDriving:
                     if aruco_markers:
                         vis_frame = self.aruco_detector.draw_markers(vis_frame, aruco_markers)
                 
-                # QR 코드 인식 (추후 구현 가능)
-                # if USE_QR and self.qr_detector is not None:
-                #     qr_codes = self.qr_detector.detect(frame)
-                #     if qr_codes:
-                #         vis_frame = self.qr_detector.draw_codes(vis_frame, qr_codes)
+                # QR 코드 인식
+                if USE_QR and self.qr_detector is not None:
+                    qr_codes = self.qr_detector.detect(frame)
+                    
+                    if qr_codes:
+                        # QR 코드 감지 시 LED 제어
+                        for qr in qr_codes:
+                            qr_data = qr['data']
+                            # 새로운 QR 코드 감지 시 LED 켜기
+                            if qr_data != self.last_qr_data:
+                                self.last_qr_data = qr_data
+                                self.controller.set_led_from_config()
+                                from config import QR_LED_DURATION
+                                self.qr_led_start_time = time.time()
+                                print(f"QR 코드 감지: {qr_data}")
+                        
+                        # QR 코드 시각화
+                        vis_frame = self.qr_detector.draw_codes(vis_frame, qr_codes)
+                    else:
+                        # QR 코드 미감지 시 LED 끄기 (지속 시간 경과 후)
+                        if self.qr_led_start_time is not None:
+                            from config import QR_LED_DURATION
+                            elapsed = time.time() - self.qr_led_start_time
+                            if elapsed >= QR_LED_DURATION:
+                                self.controller.set_led_off()
+                                self.qr_led_start_time = None
+                                self.last_qr_data = None
                 
                 # 상태 메시지
                 status_msg = "ArUco/QR 인식"
@@ -292,12 +325,28 @@ class AutonomousDriving:
         # 차선 감지 (중앙선 포함)
         left_lane, right_lane, center_lane = self.lane_detector.detect_lanes(frame)
         
-        # 초기 차선 감지 실패 시 대기 (처음 몇 프레임)
-        # 중앙선이 없고 양쪽 차선도 없으면 대기
-        if (center_lane is None and (left_lane is None or right_lane is None)) and self.frame_count <= 10:
-            # 초기 상태에서는 차선 감지 대기
-            print(f"차선 감지 대기 중... (프레임 {self.frame_count})")
-            return frame, None
+        # 차선 미감지 시 정지
+        if center_lane is None and (left_lane is None or right_lane is None):
+            # 초기 몇 프레임은 대기, 이후에는 정지
+            if self.frame_count <= 10:
+                print(f"차선 감지 대기 중... (프레임 {self.frame_count})")
+                return frame, None
+            else:
+                # 차선 미감지 시 정지 명령
+                print(f"경고: 차선 미감지 - 정지 (프레임 {self.frame_count})")
+                stop_command = {
+                    'steering_angle': 0.0,
+                    'speed': 0.0,
+                    'is_safe': False,
+                    'safety_message': '차선 미감지 - 정지',
+                    'offset': 0.0,
+                    'avoidance_mode': False,
+                    'aruco_mode': False
+                }
+                vis_frame = frame.copy()
+                cv2.putText(vis_frame, "차선 미감지 - 정지",
+                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+                return vis_frame, stop_command
         
         # 차선 정보 저장 (회피 계획에 사용)
         self.last_left_lane = left_lane
@@ -311,7 +360,7 @@ class AutonomousDriving:
         self.last_offset = offset
         
         # 곡선 정보 가져오기
-        is_curve, curve_radius = self.lane_detector.get_curve_info()
+        is_curve, curve_radius, curve_direction = self.lane_detector.get_curve_info()
         
         # 제어 명령 생성 (우선순위: 포트홀 회피 > ArUco 명령 > 차선 추종)
         control_command = self.controller.get_control_command(
@@ -322,6 +371,7 @@ class AutonomousDriving:
             image_width=self.image_width,
             is_curve=is_curve,  # 곡선 구간 여부
             curve_radius=curve_radius,  # 곡선 반경
+            curve_direction=curve_direction,  # 곡선 방향 (-1: 왼쪽, +1: 오른쪽)
             avoidance_command=self.current_avoidance_command,
             aruco_command=self.current_aruco_command
         )
@@ -372,10 +422,17 @@ class AutonomousDriving:
         
         steering_angle = control_command['steering_angle']
         speed = control_command['speed']
+        safety_message = control_command.get('safety_message', '')
         
-        # 안전하지 않으면 경고 출력하고 속도만 줄임 (조향은 계속 실행)
+        # 차선 미감지 시 완전 정지
+        if '차선 미감지' in safety_message:
+            print(f"정지: {safety_message}")
+            self.controller.stop_motors()
+            return
+        
+        # 안전하지 않으면 경고 출력
         if not control_command['is_safe']:
-            print(f"경고: {control_command['safety_message']}")
+            print(f"경고: {safety_message}")
             # 차선 이탈 위험일 때는 조향을 실행하여 복귀하도록 함
             # 속도만 줄임
             speed = min(speed, self.controller.min_speed * 0.5)  # 최소 속도의 50%로 감속
