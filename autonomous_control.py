@@ -77,22 +77,30 @@ class AutonomousController:
         self.turn_sensitivity = TURN_SENSITIVITY  # 조향 민감도
         self.deadzone = STEERING_DEADZONE  # 데드존
         
-    def calculate_steering(self, offset: float, image_width: int = 640) -> float:
+    def calculate_steering(self, offset: float, image_width: int = 640, has_center_lane: bool = False, 
+                          is_curve: bool = False, curve_radius: Optional[float] = None, 
+                          curve_direction: Optional[float] = None) -> float:
         """
-        조향 각도 계산 (PID 제어 + 스무딩)
+        조향 각도 계산 (PID 제어 + 스무딩 + 곡선 보정)
         
         Args:
             offset: 차선 중심으로부터의 오프셋 (픽셀)
                    양수: 차선 중심이 오른쪽에 있음 -> 왼쪽으로 조향 필요
                    음수: 차선 중심이 왼쪽에 있음 -> 오른쪽으로 조향 필요
             image_width: 이미지 너비
+            has_center_lane: 중앙선 감지 여부 (True면 더 강하게 반응)
+            is_curve: 곡선 구간 여부
+            curve_radius: 곡선 반경 (픽셀, 작을수록 급커브)
             
         Returns:
             steering_angle: 조향 각도 (-max_steering_angle ~ max_steering_angle)
                           양수: 오른쪽 회전, 음수: 왼쪽 회전
         """
+        # 중앙선이 있으면 데드존을 더 작게 (더 민감하게 반응)
+        deadzone = self.deadzone // 2 if has_center_lane else self.deadzone
+        
         # 데드존 적용 (작은 오프셋 무시)
-        if abs(offset) < self.deadzone:
+        if abs(offset) < deadzone:
             offset = 0.0
         
         # 정규화된 오프셋 (-1.0 ~ 1.0)
@@ -103,8 +111,48 @@ class AutonomousController:
         # 따라서 부호를 반대로 해야 함
         target_offset = -normalized_offset
         
+        # 중앙선이 있으면 KP 증가 (더 강한 반응)
+        from config import CENTER_LANE_KP_MULTIPLIER, CURVE_STEERING_MULTIPLIER
+        effective_kp = self.kp * CENTER_LANE_KP_MULTIPLIER if has_center_lane else self.kp
+        
+        # 곡선 구간이면 조향 배율 적용 및 선행 보정
+        if is_curve and curve_radius is not None:
+            # 곡선 반경이 작을수록 (급커브) 더 강한 조향 필요
+            # 반경이 작으면 배율 증가, 반경이 크면 배율 감소
+            if curve_radius < image_width * 0.8:  # 급커브
+                curve_multiplier = CURVE_STEERING_MULTIPLIER * 1.8
+            elif curve_radius < image_width * 1.5:  # 중간 커브
+                curve_multiplier = CURVE_STEERING_MULTIPLIER * 1.5
+            elif curve_radius < image_width * 2.5:  # 완만한 커브
+                curve_multiplier = CURVE_STEERING_MULTIPLIER
+            else:  # 매우 완만한 커브
+                curve_multiplier = CURVE_STEERING_MULTIPLIER * 0.9
+            
+            effective_kp *= curve_multiplier
+            
+            # 곡선 방향 정보를 활용한 선행 보정
+            if curve_direction is not None:
+                # 곡선 방향에 따른 선행 조향 보정
+                # curve_direction: -1 (왼쪽 곡선), +1 (오른쪽 곡선)
+                # 왼쪽 곡선이면 왼쪽으로 미리 조향 (음수), 오른쪽 곡선이면 오른쪽으로 미리 조향 (양수)
+                # 반경이 작을수록 더 강한 선행 보정
+                if curve_radius < image_width * 1.5:
+                    # 급커브: 최대 조향 각도의 15~25% 선행 보정
+                    anticipatory_steering = curve_direction * self.max_steering_angle * 0.2
+                elif curve_radius < image_width * 2.5:
+                    # 중간 커브: 최대 조향 각도의 8~15% 선행 보정
+                    anticipatory_steering = curve_direction * self.max_steering_angle * 0.12
+                else:
+                    # 완만한 커브: 최대 조향 각도의 5% 선행 보정
+                    anticipatory_steering = curve_direction * self.max_steering_angle * 0.05
+                
+                # 선행 보정을 target_offset에 반영
+                # 곡선 방향으로 미리 조향하기 위해 offset에 보정값 추가
+                anticipatory_offset = anticipatory_steering / self.max_steering_angle * (image_width / 2)
+                target_offset += anticipatory_offset
+        
         # 비례 제어
-        p_term = self.kp * target_offset
+        p_term = effective_kp * target_offset
         
         # 미분 제어
         d_term = self.kd * (target_offset - self.prev_offset)
@@ -117,8 +165,14 @@ class AutonomousController:
                                 -self.max_steering_angle, 
                                 self.max_steering_angle)
         
-        # 조향 각도 스무딩 (비틀거림 방지)
-        smoothing_factor = 0.7  # 이전 값 70% 유지
+        # 조향 각도 스무딩 (곡선 구간에서는 덜 스무딩하여 빠르게 반응)
+        if is_curve:
+            smoothing_factor = 0.2 
+        elif has_center_lane:
+            smoothing_factor = 0.5  # 중앙선: 50% 유지
+        else:
+            smoothing_factor = 0.7  # 일반: 70% 유지
+        
         steering_angle = (smoothing_factor * self.prev_steering_angle + 
                          (1 - smoothing_factor) * steering_angle)
         
@@ -205,7 +259,11 @@ class AutonomousController:
                            offset: float,
                            left_lane: Optional[np.ndarray] = None,
                            right_lane: Optional[np.ndarray] = None,
+                           center_lane: Optional[np.ndarray] = None,
                            image_width: int = 640,
+                           is_curve: bool = False,
+                           curve_radius: Optional[float] = None,
+                           curve_direction: Optional[float] = None,
                            avoidance_command: Optional[Dict] = None,
                            aruco_command: Optional[Dict] = None) -> dict:
         """
@@ -215,20 +273,26 @@ class AutonomousController:
             offset: 차선 중심으로부터의 오프셋
             left_lane: 왼쪽 차선 정보
             right_lane: 오른쪽 차선 정보
+            center_lane: 중앙선 정보 (있으면 더 강하게 중앙 정렬)
             image_width: 이미지 너비
+            is_curve: 곡선 구간 여부
+            curve_radius: 곡선 반경 (픽셀)
             avoidance_command: 회피 명령 (최우선)
             aruco_command: ArUco 마커 명령 (2순위)
         
         Returns:
             control_command: 조향, 속도, 안전 정보를 포함한 딕셔너리
         """
+        # 중앙선 감지 여부
+        has_center_lane = center_lane is not None
         # 1순위: 포트홀 회피 명령 (최우선)
         if avoidance_command is not None and avoidance_command.get('action') != 'normal':
             target_offset = avoidance_command.get('target_offset', offset)
             avoidance_speed = avoidance_command.get('speed', self.min_speed)
             
-            # 회피 목표 오프셋으로 조향 계산
-            steering_angle = self.calculate_steering(target_offset, image_width)
+            # 회피 목표 오프셋으로 조향 계산 (곡선 정보 포함)
+            steering_angle = self.calculate_steering(target_offset, image_width, has_center_lane, 
+                                                   is_curve, curve_radius, curve_direction)
             speed = avoidance_speed
             
             # 회피 상태 메시지
@@ -276,8 +340,9 @@ class AutonomousController:
                     'aruco_mode': True
                 }
             else:
-                # go_straight는 차선 추종으로 처리
-                steering_angle = self.calculate_steering(offset, image_width)
+                # go_straight는 차선 추종으로 처리 (곡선 정보 포함)
+                steering_angle = self.calculate_steering(offset, image_width, has_center_lane, 
+                                                        is_curve, curve_radius, curve_direction)
                 safety_message = "ArUco: 직진 (차선 추종)"
             
             return {
@@ -291,15 +356,33 @@ class AutonomousController:
             }
         
         # 정상 주행 모드
-        steering_angle = self.calculate_steering(offset, image_width)
-        speed = self.calculate_speed(offset, left_lane, right_lane)
+        # 차선 안전성 검사 먼저 수행
         is_safe, safety_message = self.check_safety(offset, left_lane, right_lane, image_width)
+        
+        # 차선 미감지 시 정지
+        if not is_safe and '차선 미감지' in safety_message:
+            return {
+                'steering_angle': 0.0,
+                'speed': 0.0,
+                'is_safe': False,
+                'safety_message': safety_message,
+                'offset': offset,
+                'avoidance_mode': False,
+                'aruco_mode': False
+            }
+        
+        # 중앙선이 있으면 더 강하게 중앙 정렬 (곡선 정보 포함)
+        steering_angle = self.calculate_steering(offset, image_width, has_center_lane, 
+                                                is_curve, curve_radius, curve_direction)
+        speed = self.calculate_speed(offset, left_lane, right_lane)
         
         # 차선 이탈 방지: 안전하지 않으면 강제 조정
         if not is_safe and abs(offset) > self.safe_offset_threshold:
-            # 차선 중심으로 강제 복귀
-            correction_offset = -offset * 0.5  # 50% 보정
-            steering_angle = self.calculate_steering(correction_offset, image_width)
+            # 차선 중심으로 강제 복귀 (중앙선이 있으면 더 강하게, 곡선 정보 포함)
+            correction_factor = 0.7 if has_center_lane else 0.5  # 중앙선: 70% 보정, 일반: 50% 보정
+            correction_offset = -offset * correction_factor
+            steering_angle = self.calculate_steering(correction_offset, image_width, has_center_lane,
+                                                    is_curve, curve_radius, curve_direction)
             speed = self.min_speed  # 감속
         
         return {
@@ -370,4 +453,56 @@ class AutonomousController:
                 self.tiki.stop()
             except Exception as e:
                 print(f"모터 정지 오류: {e}")
+    
+    def set_led(self, color: str = "off"):
+        """
+        LED 제어
+        
+        Args:
+            color: LED 색상 ("red", "green", "blue", "yellow", "off")
+        """
+        if not self.use_tiki or self.tiki is None:
+            return
+        
+        try:
+            # TikiMini API의 LED 제어 메서드 호출
+            # API에 따라 메서드 이름이 다를 수 있음
+            if hasattr(self.tiki, 'set_led'):
+                # 색상 매핑
+                color_map = {
+                    "red": self.tiki.LED_RED if hasattr(self.tiki, 'LED_RED') else 1,
+                    "green": self.tiki.LED_GREEN if hasattr(self.tiki, 'LED_GREEN') else 2,
+                    "blue": self.tiki.LED_BLUE if hasattr(self.tiki, 'LED_BLUE') else 3,
+                    "yellow": self.tiki.LED_YELLOW if hasattr(self.tiki, 'LED_YELLOW') else 4,
+                    "off": 0
+                }
+                led_value = color_map.get(color.lower(), 0)
+                self.tiki.set_led(led_value)
+            elif hasattr(self.tiki, 'set_led_color'):
+                self.tiki.set_led_color(color)
+            elif hasattr(self.tiki, 'led'):
+                # 속성으로 접근하는 경우
+                self.tiki.led = color
+            else:
+                # 기본 시도: 직접 메서드 호출
+                try:
+                    if color.lower() == "off":
+                        self.tiki.led_off()
+                    else:
+                        method_name = f"led_{color.lower()}"
+                        if hasattr(self.tiki, method_name):
+                            getattr(self.tiki, method_name)()
+                except:
+                    pass
+        except Exception as e:
+            print(f"LED 제어 오류: {e}")
+    
+    def set_led_from_config(self):
+        """config.py의 QR_LED_COLOR 설정값으로 LED 제어"""
+        from config import QR_LED_COLOR
+        self.set_led(QR_LED_COLOR)
+    
+    def set_led_off(self):
+        """LED 끄기"""
+        self.set_led("off")
 
