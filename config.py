@@ -53,10 +53,22 @@ USE_TIKI = True  # TikiMini API 사용 여부
 MOTOR_MODE = "PID"  # "PWM" 또는 "PID"
 TURN_SENSITIVITY = 0.5  # 조향 민감도 (0.0 ~ 1.0)
 
+# YOLO 객체 탐지 설정
+USE_YOLO = False  # YOLO 사용 여부 (False면 전통적인 CV 방법 사용)
+YOLO_ENGINE_PATH = "yolo/Object7.v7-maicon_mortar_background.yolov8/yolov8n/weights/best.trt"  # TensorRT 엔진 경로
+YOLO_CONF_THRESHOLD = 0.25  # 신뢰도 임계값
+YOLO_IOU_THRESHOLD = 0.45  # NMS IoU 임계값
+YOLO_CLASS_NAMES = ["unknown"]  # TODO: 실제 학습된 클래스 목록으로 변경
+YOLO_AVOIDANCE_CLASSES = []  # 회피가 필요한 객체 클래스
+YOLO_DISPLAY_ONLY_CLASSES = []  # 표시만 하는 객체 클래스
+
 # ArUco 마커 설정
 USE_ARUCO = False  # ArUco 마커 사용 여부
 ARUCO_DICTIONARY = 8  # cv2.aruco.DICT_6X6_50 (8) - 회전된 마커 감지 개선
 ARUCO_TURN_ANGLE = 25.0  # 회전 각도 (도)
 ARUCO_TURN_DURATION = 2.0  # 회전 지속 시간 (초)
 ARUCO_TURN_SPEED = 0.4  # 회전 시 속도 (0.0 ~ 1.0)
+
+# QR 코드 설정 (추후 구현)
+USE_QR = False  # QR 코드 인식 사용 여부
 

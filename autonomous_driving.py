@@ -1,7 +1,9 @@
 """
 자율주행 메인 실행 파일
-홀수 프레임에서 차선 인식 및 자율주행 제어 수행
-짝수 프레임에서 포트홀 감지 및 회피 계획
+프레임 분산 처리 방식:
+- 홀수 프레임: 차선 인식 및 자율주행 제어 (실시간)
+- 4의 배수 프레임 (0, 4, 8, ...): YOLO 객체 인식 (무거운 작업)
+- 4의 배수+2 프레임 (2, 6, 10, ...): ArUco 마커 + QR 코드 인식 (가벼운 작업)
 """
 import cv2
 import time
@@ -165,50 +167,113 @@ class AutonomousDriving:
     
     def process_frame(self, frame: np.ndarray) -> tuple:
         """
-        프레임 처리
-        - 홀수 프레임: 차선 인식 및 자율주행 제어
-        - 짝수 프레임: 포트홀 감지 및 회피 계획
+        프레임 처리 (분산 처리 방식)
+        - 홀수 프레임: 차선 인식 및 자율주행 제어 (실시간)
+        - 4의 배수 프레임 (0, 4, 8, ...): YOLO 객체 인식 (무거운 작업)
+        - 4의 배수+2 프레임 (2, 6, 10, ...): ArUco 마커 + QR 코드 인식 (가벼운 작업)
         
         Returns:
             (processed_frame, control_command): 처리된 프레임과 제어 명령
         """
         self.frame_count += 1
         
-        # 짝수 프레임: 포트홀 감지 및 ArUco 마커 감지
+        # 짝수 프레임: 객체 인식 작업 (분산 처리)
         if self.frame_count % 2 == 0:
-            # 포트홀 감지 임시 비활성화 (오탐 방지 - 차선 추종 테스트용)
-            potholes = []
-            # potholes = self.object_detector.detect_potholes(frame)  # 주석 처리
-            
-            # 정상 주행만 (포트홀 회피 비활성화)
-            self.current_avoidance_command = {'action': 'normal'}
-            
-            # ArUco 마커 감지
-            aruco_markers = []
-            if USE_ARUCO and self.aruco_detector is not None:
-                aruco_command, aruco_markers = self.aruco_detector.detect_markers(frame)
-                
-                if aruco_command is not None:
-                    # ArUco 명령이 감지되면 저장
-                    self.current_aruco_command = aruco_command
-                    from config import ARUCO_TURN_DURATION
-                    self.aruco_command_start_time = time.time()
-                    self.aruco_command_duration = ARUCO_TURN_DURATION
-                else:
-                    # ArUco 명령이 없으면 이전 명령 지속 시간 확인
-                    if self.aruco_command_start_time is not None:
-                        elapsed = time.time() - self.aruco_command_start_time
-                        if elapsed >= self.aruco_command_duration:
-                            # 지속 시간 경과 시 명령 해제
-                            self.current_aruco_command = None
-                            self.aruco_command_start_time = None
-            
-            # 시각화 (차선 및 ArUco 마커 표시)
             vis_frame = frame.copy()
             
-            # 차선 정보 표시
+            # 4의 배수 프레임: YOLO 객체 인식 (포트홀 등)
+            if self.frame_count % 4 == 0:
+                from config import USE_YOLO
+                if USE_YOLO:
+                    # YOLO 사용 (TensorRT) - 모든 객체 감지
+                    avoidance_objects, all_objects = self.object_detector.detect_objects(frame)
+                    potholes = avoidance_objects  # 회피 대상 객체
+                    
+                    # 회피 계획 생성 (회피 대상 객체만)
+                    if potholes:
+                        # 가장 가까운 포트홀 선택 (이미지 하단에 가까운 것, y 좌표가 큰 것)
+                        closest_pothole = max(potholes, key=lambda p: p['center'][1])
+                        
+                        avoidance_command = self.avoidance_planner.plan_avoidance(
+                            pothole=closest_pothole,
+                            left_lane=self.last_left_lane,
+                            right_lane=self.last_right_lane,
+                            current_offset=self.last_offset
+                        )
+                        self.current_avoidance_command = avoidance_command
+                    else:
+                        # 정상 주행
+                        self.current_avoidance_command = {'action': 'normal'}
+                    
+                    # 모든 객체 시각화
+                    if all_objects:
+                        vis_frame = self.object_detector.draw_objects(vis_frame, all_objects, show_class_name=True)
+                        avoidance_count = len(potholes)
+                        total_count = len(all_objects)
+                        status_msg = f"YOLO: {total_count}개 (회피: {avoidance_count}개)"
+                    else:
+                        status_msg = "YOLO: 객체 없음"
+                else:
+                    # 전통적인 CV 방법 (포트홀만)
+                    potholes = self.object_detector.detect_potholes(frame)
+                    if potholes:
+                        closest_pothole = max(potholes, key=lambda p: p['center'][1])
+                        avoidance_command = self.avoidance_planner.plan_avoidance(
+                            pothole=closest_pothole,
+                            left_lane=self.last_left_lane,
+                            right_lane=self.last_right_lane,
+                            current_offset=self.last_offset
+                        )
+                        self.current_avoidance_command = avoidance_command
+                        vis_frame = self.object_detector.draw_potholes(vis_frame, potholes)
+                        status_msg = f"포트홀: {len(potholes)}개"
+                    else:
+                        self.current_avoidance_command = {'action': 'normal'}
+                        status_msg = "포트홀: 없음"
+            
+            # 4의 배수+2 프레임: ArUco 마커 + QR 코드 인식
+            elif self.frame_count % 4 == 2:
+                aruco_markers = []
+                qr_codes = []
+                
+                # ArUco 마커 감지
+                if USE_ARUCO and self.aruco_detector is not None:
+                    aruco_command, aruco_markers = self.aruco_detector.detect_markers(frame)
+                    
+                    if aruco_command is not None:
+                        # ArUco 명령이 감지되면 저장
+                        self.current_aruco_command = aruco_command
+                        from config import ARUCO_TURN_DURATION
+                        self.aruco_command_start_time = time.time()
+                        self.aruco_command_duration = ARUCO_TURN_DURATION
+                    else:
+                        # ArUco 명령이 없으면 이전 명령 지속 시간 확인
+                        if self.aruco_command_start_time is not None:
+                            elapsed = time.time() - self.aruco_command_start_time
+                            if elapsed >= self.aruco_command_duration:
+                                # 지속 시간 경과 시 명령 해제
+                                self.current_aruco_command = None
+                                self.aruco_command_start_time = None
+                    
+                    # ArUco 마커 시각화
+                    if aruco_markers:
+                        vis_frame = self.aruco_detector.draw_markers(vis_frame, aruco_markers)
+                
+                # QR 코드 인식 (추후 구현 가능)
+                # if USE_QR and self.qr_detector is not None:
+                #     qr_codes = self.qr_detector.detect(frame)
+                #     if qr_codes:
+                #         vis_frame = self.qr_detector.draw_codes(vis_frame, qr_codes)
+                
+                # 상태 메시지
+                status_msg = "ArUco/QR 인식"
+                if self.current_aruco_command:
+                    status_msg += f" | ArUco: {self.current_aruco_command.get('action', 'unknown')}"
+                if qr_codes:
+                    status_msg += f" | QR: {len(qr_codes)}개"
+            
+            # 차선 정보 표시 (모든 짝수 프레임에)
             if self.last_left_lane is not None and self.last_right_lane is not None:
-                # 중앙선도 포함하여 계산
                 center_point = self.lane_detector.calculate_center(
                     self.last_left_lane, self.last_right_lane, None
                 )
@@ -216,14 +281,7 @@ class AutonomousDriving:
                     vis_frame, self.last_left_lane, self.last_right_lane, center_point, None
                 )
             
-            # ArUco 마커 시각화
-            if USE_ARUCO and self.aruco_detector is not None and aruco_markers:
-                vis_frame = self.aruco_detector.draw_markers(vis_frame, aruco_markers)
-            
             # 상태 메시지 표시
-            status_msg = "포트홀 감지 비활성화 (테스트 모드)"
-            if self.current_aruco_command:
-                status_msg += f" | ArUco: {self.current_aruco_command.get('action', 'unknown')}"
             cv2.putText(vis_frame, status_msg,
                        (10, self.image_height - 50),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
