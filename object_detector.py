@@ -1,13 +1,21 @@
-"""
-객체 디텍션 모듈
-포트홀 감지 및 장애물 인식
-Bird's Eye View 적용
-"""
+# -*- coding: utf-8 -*-
+# 객체 디텍션 모듈
+# 포트홀 감지 및 장애물 인식
+# Bird's Eye View 적용
+import os
 import cv2
 import numpy as np
 from typing import List, Optional, Tuple, Dict
 from config import *
 from perspective_transform import PerspectiveTransform
+
+# YOLO TensorRT 추론 (선택적)
+try:
+    from yolo_inference import YOLOTensorRT
+    YOLO_AVAILABLE = True
+except ImportError:
+    YOLO_AVAILABLE = False
+    print("경고: YOLO 추론 모듈을 사용할 수 없습니다. 전통적인 CV 방법을 사용합니다.")
 
 
 class ObjectDetector:
@@ -60,15 +68,139 @@ class ObjectDetector:
         # 포트홀 감지 임계값
         self.depth_threshold = 30  # 깊이 차이 임계값
         
-    def detect_potholes(self, frame: np.ndarray) -> List[Dict]:
+        # YOLO 초기화 (설정에서 활성화된 경우)
+        self.use_yolo = USE_YOLO and YOLO_AVAILABLE
+        self.yolo_model = None
+        
+        # 클래스 설정
+        self.class_names = YOLO_CLASS_NAMES
+        self.avoidance_classes = YOLO_AVOIDANCE_CLASSES
+        self.display_only_classes = YOLO_DISPLAY_ONLY_CLASSES
+        
+        # 클래스 ID 매핑 (이름 -> ID)
+        self.class_id_map = {name: idx for idx, name in enumerate(self.class_names)}
+        # 회피가 필요한 클래스 ID
+        self.avoidance_class_ids = [self.class_id_map.get(name, -1) 
+                                    for name in self.avoidance_classes 
+                                    if name in self.class_id_map]
+        
+        if self.use_yolo:
+            try:
+                engine_path = YOLO_ENGINE_PATH
+                
+                # 여러 경로 시도
+                possible_paths = [
+                    engine_path,  # 원본 경로
+                    os.path.join(os.path.dirname(__file__), engine_path),  # 현재 디렉토리 기준
+                    os.path.join(os.path.dirname(__file__), '..', engine_path),  # 상위 디렉토리
+                    os.path.abspath(engine_path),  # 절대 경로
+                    os.path.join(os.getcwd(), engine_path),  # 작업 디렉토리 기준
+                ]
+                
+                found_path = None
+                for path in possible_paths:
+                    path = os.path.normpath(path)
+                    if os.path.exists(path):
+                        found_path = path
+                        break
+                
+                if found_path:
+                    self.yolo_model = YOLOTensorRT(
+                        engine_path=found_path,
+                        conf_threshold=YOLO_CONF_THRESHOLD,
+                        iou_threshold=YOLO_IOU_THRESHOLD
+                    )
+                    print(f"YOLO 모델 로드 완료: {found_path}")
+                    print(f"감지 가능한 클래스: {self.class_names}")
+                    print(f"회피 대상 클래스: {self.avoidance_classes}")
+                else:
+                    print(f"경고: YOLO 엔진 파일을 찾을 수 없습니다.")
+                    print(f"  시도한 경로:")
+                    for path in possible_paths:
+                        print(f"    - {os.path.normpath(path)}")
+                    print("전통적인 CV 방법을 사용합니다.")
+                    self.use_yolo = False
+            except Exception as e:
+                print(f"YOLO 초기화 실패: {e}")
+                print("전통적인 CV 방법을 사용합니다.")
+                self.use_yolo = False
+        
+    def detect_objects(self, frame: np.ndarray) -> Tuple[List[Dict], List[Dict]]:
         """
-        포트홀 감지
+        객체 감지 (YOLO 또는 전통적인 CV 방법)
         
         Args:
             frame: 입력 프레임
             
         Returns:
-            potholes: 포트홀 정보 리스트 [{'bbox': (x, y, w, h), 'center': (cx, cy), 'area': area}]
+            (avoidance_objects, all_objects): 
+                - avoidance_objects: 회피가 필요한 객체 리스트 (포트홀 등)
+                - all_objects: 모든 감지된 객체 리스트 (표시용)
+        """
+        # YOLO 사용 시
+        if self.use_yolo and self.yolo_model is not None:
+            try:
+                # YOLO 추론 (전체 프레임 사용)
+                detections = self.yolo_model.predict(frame)
+                
+                # 모든 객체와 회피 대상 객체 분리
+                all_objects = []
+                avoidance_objects = []
+                
+                for det in detections:
+                    class_id = det.get('class', -1)
+                    class_name = self.class_names[class_id] if 0 <= class_id < len(self.class_names) else f"class_{class_id}"
+                    
+                    # 객체 정보 구성
+                    obj_info = {
+                        'bbox': det['bbox'],
+                        'center': det['center'],
+                        'area': det['area'],
+                        'conf': det['conf'],
+                        'class': class_id,
+                        'class_name': class_name
+                    }
+                    
+                    all_objects.append(obj_info)
+                    
+                    # 회피 대상인지 확인
+                    if class_id in self.avoidance_class_ids:
+                        # 크기 필터링 (포트홀 등 회피 대상만)
+                        if self.min_pothole_area <= obj_info['area'] <= self.max_pothole_area:
+                            avoidance_objects.append(obj_info)
+                
+                return avoidance_objects, all_objects
+            except Exception as e:
+                print(f"YOLO 추론 오류: {e}")
+                # 오류 시 전통적인 방법으로 폴백
+                pass
+        
+        # 전통적인 CV 방법 (포트홀만 감지)
+        potholes = self.detect_potholes_cv(frame)
+        return potholes, potholes
+    
+    def detect_potholes(self, frame: np.ndarray) -> List[Dict]:
+        """
+        포트홀 감지 (하위 호환성을 위한 메서드)
+        
+        Args:
+            frame: 입력 프레임
+            
+        Returns:
+            potholes: 포트홀 정보 리스트 [{'bbox': (x, y, w, h), 'center': (cx, cy), 'area': area, 'conf': conf}]
+        """
+        avoidance_objects, _ = self.detect_objects(frame)
+        return avoidance_objects
+    
+    def detect_potholes_cv(self, frame: np.ndarray) -> List[Dict]:
+        """
+        전통적인 CV 방법으로 포트홀 감지
+        
+        Args:
+            frame: 입력 프레임
+            
+        Returns:
+            potholes: 포트홀 정보 리스트 [{'bbox': (x, y, w, h), 'center': (cx, cy), 'area': area, 'conf': conf, 'class': class_id, 'class_name': class_name}]
         """
         # Bird's Eye View 변환
         if self.use_bird_view and self.perspective_transform:
@@ -156,6 +288,9 @@ class ObjectDetector:
                 'bbox': orig_bbox,
                 'center': orig_center,
                 'area': area,
+                'conf': 0.8,  # CV 방법은 신뢰도 없으므로 기본값
+                'class': 0,  # 포트홀 클래스 ID
+                'class_name': 'pothole',
                 'roi_center': (cx, cy),  # ROI 내부 좌표
                 'warped_center': (cx, cy) if self.use_bird_view else None  # 변환된 이미지 좌표
             })
@@ -326,6 +461,56 @@ class ObjectDetector:
                 cv2.putText(vis_frame, f"Pothole: {pothole['area']:.0f}",
                            (x, global_y - 10),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        
+        return vis_frame
+    
+    def draw_objects(self,
+                     frame: np.ndarray,
+                     objects: List[Dict],
+                     show_class_name: bool = True) -> np.ndarray:
+        """
+        모든 객체 시각화
+        
+        Args:
+            frame: 입력 프레임
+            objects: 객체 리스트
+            show_class_name: 클래스 이름 표시 여부
+        
+        Returns:
+            vis_frame: 시각화된 프레임
+        """
+        vis_frame = frame.copy()
+        
+        for obj in objects:
+            x, y, w, h = obj['bbox']
+            cx, cy = obj['center']
+            conf = obj.get('conf', 0.0)
+            class_name = obj.get('class_name', 'unknown')
+            class_id = obj.get('class', -1)
+            
+            # 회피 대상인지 확인
+            is_avoidance = class_id in self.avoidance_class_ids if hasattr(self, 'avoidance_class_ids') else False
+            
+            # 색상 설정
+            if is_avoidance:
+                color = (0, 0, 255)  # 빨간색 (회피 대상)
+                thickness = 3
+            else:
+                color = (0, 255, 255)  # 노란색 (표시만)
+                thickness = 2
+            
+            # 바운딩 박스 그리기
+            cv2.rectangle(vis_frame, (x, y), (x + w, y + h), color, thickness)
+            
+            # 클래스 이름과 신뢰도 표시
+            if show_class_name:
+                label = f"{class_name}: {conf:.2f}"
+                label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                label_y = max(y - 10, label_size[1])
+                cv2.rectangle(vis_frame, (x, label_y - label_size[1] - 5), 
+                             (x + label_size[0], label_y + 5), color, -1)
+                cv2.putText(vis_frame, label, (x, label_y),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         return vis_frame
 

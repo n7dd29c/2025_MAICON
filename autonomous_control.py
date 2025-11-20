@@ -143,7 +143,7 @@ class AutonomousController:
         
         # 조향 각도 스무딩 (곡선 구간에서는 덜 스무딩하여 빠르게 반응)
         if is_curve:
-            smoothing_factor = 0.4  # 곡선: 40% 유지 (더 빠른 반응)
+            smoothing_factor = 0.2 
         elif has_center_lane:
             smoothing_factor = 0.5  # 중앙선: 50% 유지
         else:

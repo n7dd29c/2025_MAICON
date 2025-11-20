@@ -54,7 +54,7 @@ MOTOR_MODE = "PID"  # "PWM" 또는 "PID"
 TURN_SENSITIVITY = 0.5  # 조향 민감도 (0.0 ~ 1.0)
 
 # YOLO 객체 탐지 설정
-USE_YOLO = False  # YOLO 사용 여부 (False면 전통적인 CV 방법 사용)
+USE_YOLO = True  # YOLO 사용 여부 (False면 전통적인 CV 방법 사용)
 YOLO_ENGINE_PATH = "yolo/Object7.v7-maicon_mortar_background.yolov8/yolov8n/weights/best.trt"  # TensorRT 엔진 경로
 YOLO_CONF_THRESHOLD = 0.25  # 신뢰도 임계값
 YOLO_IOU_THRESHOLD = 0.45  # NMS IoU 임계값
