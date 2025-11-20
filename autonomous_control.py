@@ -96,11 +96,25 @@ class AutonomousController:
             steering_angle: 조향 각도 (-max_steering_angle ~ max_steering_angle)
                           양수: 오른쪽 회전, 음수: 왼쪽 회전
         """
-        # 중앙선이 있으면 데드존을 더 작게 (더 민감하게 반응)
-        deadzone = self.deadzone // 2 if has_center_lane else self.deadzone
+        from config import STRAIGHT_DRIVING_THRESHOLD, STRAIGHT_DRIVING_SMOOTHING
         
+        # 중앙선을 잘 따라가고 있으면 직진 모드 (조향 최소화)
+        abs_offset = abs(offset)
+        is_straight_mode = has_center_lane and abs_offset < STRAIGHT_DRIVING_THRESHOLD
+        
+        if is_straight_mode:
+            # 직진 모드: 조향 각도를 0에 가깝게 유지 (스무딩 강화)
+            steering_angle = 0.0
+            smoothing_factor = STRAIGHT_DRIVING_SMOOTHING  # 85% 유지로 매우 부드럽게
+            steering_angle = (smoothing_factor * self.prev_steering_angle + 
+                             (1 - smoothing_factor) * steering_angle)
+            self.prev_offset = 0.0  # 직진 모드에서는 오프셋 0으로 설정
+            self.prev_steering_angle = steering_angle
+            return steering_angle
+        
+        # 조향 필요 모드: 정상 PID 제어
         # 데드존 적용 (작은 오프셋 무시)
-        if abs(offset) < deadzone:
+        if abs_offset < self.deadzone:
             offset = 0.0
         
         # 정규화된 오프셋 (-1.0 ~ 1.0)
@@ -169,7 +183,7 @@ class AutonomousController:
         if is_curve:
             smoothing_factor = 0.2 
         elif has_center_lane:
-            smoothing_factor = 0.5  # 중앙선: 50% 유지
+            smoothing_factor = 0.75  # 중앙선: 75% 유지 (0.5 -> 0.75, 더 부드럽게)
         else:
             smoothing_factor = 0.7  # 일반: 70% 유지
         
@@ -184,7 +198,8 @@ class AutonomousController:
     
     def calculate_speed(self, offset: float, 
                        left_lane: Optional[np.ndarray] = None,
-                       right_lane: Optional[np.ndarray] = None) -> float:
+                       right_lane: Optional[np.ndarray] = None,
+                       has_center_lane: bool = False) -> float:
         """
         속도 계산
         
@@ -192,21 +207,28 @@ class AutonomousController:
             offset: 차선 중심으로부터의 오프셋
             left_lane: 왼쪽 차선 정보
             right_lane: 오른쪽 차선 정보
+            has_center_lane: 중앙선 감지 여부
             
         Returns:
             speed: 속도 (0.0 ~ 1.0)
         """
-        # 차선이 감지되지 않으면 감속
+        from config import STRAIGHT_DRIVING_THRESHOLD
+        
+        # 차선이 감지되지 않으면 최소 속도 유지 (너무 느리지 않게)
         if left_lane is None or right_lane is None:
-            return self.min_speed * 0.5
+            return self.min_speed  # 0.5가 아닌 min_speed 유지
         
         # 오프셋이 크면 감속 (차선 이탈 위험)
         abs_offset = abs(offset)
         if abs_offset > self.safe_offset_threshold:
             return self.min_speed
         
-        # 정상 주행 시 속도 계산
-        speed_factor = 1.0 - (abs_offset / self.safe_offset_threshold) * 0.3
+        # 중앙선을 잘 따라가고 있으면 최대 속도 유지
+        if has_center_lane and abs_offset < STRAIGHT_DRIVING_THRESHOLD:
+            return self.max_speed  # 직진 모드: 최대 속도
+        
+        # 정상 주행 시 속도 계산 (오프셋이 작을수록 빠르게)
+        speed_factor = 1.0 - (abs_offset / self.safe_offset_threshold) * 0.2  # 0.3 -> 0.2, 속도 감소 완화
         speed = self.min_speed + (self.max_speed - self.min_speed) * speed_factor
         
         return np.clip(speed, self.min_speed, self.max_speed)
@@ -359,11 +381,13 @@ class AutonomousController:
         # 차선 안전성 검사 먼저 수행
         is_safe, safety_message = self.check_safety(offset, left_lane, right_lane, image_width)
         
-        # 차선 미감지 시 정지
+        # 차선 미감지 시 처리 (autonomous_driving.py에서 이미 처리하므로 여기서는 경고만)
         if not is_safe and '차선 미감지' in safety_message:
+            # 차선 미감지 시 이전 조향 각도 유지하고 느린 속도로 주행
+            # (autonomous_driving.py에서 이전 차선 정보를 사용하므로 여기 도달하지 않아야 함)
             return {
-                'steering_angle': 0.0,
-                'speed': 0.0,
+                'steering_angle': self.prev_steering_angle * 0.5,  # 이전 조향의 50% 유지
+                'speed': self.min_speed * 0.7,  # 최소 속도의 70%
                 'is_safe': False,
                 'safety_message': safety_message,
                 'offset': offset,
@@ -374,7 +398,7 @@ class AutonomousController:
         # 중앙선이 있으면 더 강하게 중앙 정렬 (곡선 정보 포함)
         steering_angle = self.calculate_steering(offset, image_width, has_center_lane, 
                                                 is_curve, curve_radius, curve_direction)
-        speed = self.calculate_speed(offset, left_lane, right_lane)
+        speed = self.calculate_speed(offset, left_lane, right_lane, has_center_lane)
         
         # 차선 이탈 방지: 안전하지 않으면 강제 조정
         if not is_safe and abs(offset) > self.safe_offset_threshold:

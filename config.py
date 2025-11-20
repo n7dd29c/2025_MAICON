@@ -21,15 +21,17 @@ YELLOW_LANE_UPPER = [30, 255, 255]
 MAX_STEERING_ANGLE = 25.0  # 도 (30 -> 25, 과도한 조향 방지)
 KP = 0.5  # 비례 게인 (0.3 -> 0.5, 중앙선 추종 강화)
 KD = 0.2  # 미분 게인 (0.15 -> 0.2, 안정성 향상)
-MAX_SPEED = 0.5  # 0.0 ~ 1.0
-MIN_SPEED = 0.2  # 0.0 ~ 1.0
+MAX_SPEED = 0.6  # 0.0 ~ 1.0 (0.5 -> 0.6, 속도 향상)
+MIN_SPEED = 0.3  # 0.0 ~ 1.0 (0.2 -> 0.3, 최소 속도 향상)
 SAFE_OFFSET_THRESHOLD = 40  # 픽셀 (50 -> 40, 더 엄격한 기준)
-STEERING_DEADZONE = 3  # 픽셀 (5 -> 3, 중앙선 추종 민감도 향상)
-CENTER_LANE_KP_MULTIPLIER = 1.5  # 중앙선 감지 시 KP 배율 (더 강한 반응)
+STEERING_DEADZONE = 5  # 픽셀 (3 -> 5, 작은 오프셋 무시로 비틀거림 방지)
+CENTER_LANE_KP_MULTIPLIER = 1.2  # 중앙선 감지 시 KP 배율 (1.5 -> 1.2, 과도한 반응 방지)
+STRAIGHT_DRIVING_THRESHOLD = 15  # 픽셀 (이 값 이하면 직진 모드)
+STRAIGHT_DRIVING_SMOOTHING = 0.85  # 직진 모드 스무딩 계수 (높을수록 부드러움)
 
 # 곡선 주행 설정
 USE_CURVE_FITTING = True  # 곡선 피팅 사용 여부 (2차 다항식)
-CURVE_DETECTION_THRESHOLD = 0.005  # 곡선 감지 임계값 (2차 계수 절댓값, 낮을수록 민감)
+CURVE_DETECTION_THRESHOLD = 0.008  # 곡선 감지 임계값 (0.005 -> 0.008, 직선 오인 방지)
 CURVE_STEERING_MULTIPLIER = 1.5  # 곡선 구간 조향 배율 (증가)
 
 # 성능 설정
@@ -43,6 +45,7 @@ BIRD_VIEW_BOTTOM_MARGIN_RATIO = 0.2  # 하단 여유 비율 (양쪽 10%)
 BIRD_VIEW_TOP_OFFSET_RATIO = 0.05  # 상단 포인트 오프셋 (상단에서 5% 아래로, 0 -> 0.05)
 
 # 포트홀 감지 설정
+USE_POTHOLE_AVOIDANCE = False  # 포트홀 회피 사용 여부 (False: 회피 안 함, 통신 보고만)
 POTHOLE_MIN_AREA = 100  # 최소 포트홀 면적 (픽셀)
 POTHOLE_MAX_AREA = 50000  # 최대 포트홀 면적 (픽셀)
 POTHOLE_AVOIDANCE_MARGIN = 50  # 회피 안전 거리 (픽셀)
@@ -62,15 +65,37 @@ YOLO_CLASS_NAMES = ["Hazmat", "Missile", "Enemy", "Tank", "Car", "Mortar", "Box"
 YOLO_AVOIDANCE_CLASSES = []  # 회피가 필요한 객체 클래스
 YOLO_DISPLAY_ONLY_CLASSES = []  # 표시만 하는 객체 클래스
 
-# ArUco 마커 설정
+# ArUco 마커 설정 (베이스라인 코드 기준)
 USE_ARUCO = True  # ArUco 마커 사용 여부
-ARUCO_DICTIONARY = 8  # cv2.aruco.DICT_6X6_50 (8) - 회전된 마커 감지 개선
+ARUCO_DICTIONARY = 10  # cv2.aruco.DICT_4X4_50 (10) - 베이스라인 코드 기준
+ARUCO_CONTROL_ENABLED = False  # ArUco 마커로 주행 제어 여부 (False: 통신 보고만, True: 주행 제어도)
 ARUCO_TURN_ANGLE = 25.0  # 회전 각도 (도)
 ARUCO_TURN_DURATION = 2.0  # 회전 지속 시간 (초)
 ARUCO_TURN_SPEED = 0.4  # 회전 시 속도 (0.0 ~ 1.0)
 
+# ArUco 마커 ID별 섹터 설정 (대시보드 통신용)
+# 마커 ID별로 다른 섹터를 설정할 수 있음
+# 설정되지 않은 마커는 DASHBOARD_SECTOR 사용
+ARUCO_MARKER_SECTORS = {
+    # 예시: 마커 ID별 섹터 설정
+    0: "Alpha",    # ID 0 → Alpha 섹터
+    8: "Bravo",    # ID 1 → Bravo 섹터
+    10: "Charlie",  # ID 2 → Charlie 섹터
+    13: "Finish",    # ID 13 → 임무종료
+    # ... (필요한 마커 ID만 설정)
+}
+
 # QR 코드 설정
 USE_QR = True  # QR 코드 인식 사용 여부
-QR_LED_COLOR = "green"  # QR 코드 인식 시 LED 색상 ("red", "green", "blue", "yellow", "off")
-QR_LED_DURATION = 1.0  # LED 점등 지속 시간 (초)
+QR_LED_DURATION = 3.0  # LED 점등 지속 시간 (초)
+# QR 코드 데이터 형식: ID_SHAPE_COLOR (예: ID_O_R, ID_X_G, ID_#_B)
+# SHAPE: O(원형), X(X모양), #(격자), R(사각형)
+# COLOR: R(빨강), G(녹색), B(파랑) - LED 색상도 자동으로 매핑됨
+
+# 대시보드 통신 설정
+USE_DASHBOARD = True  # 대시보드 통신 사용 여부
+DASHBOARD_SERVER_URL = "http://58.229.150.23:5000"  # 대시보드 서버 URL
+MISSION_CODE = "2W9G"  # 임무 코드
+DASHBOARD_SECTOR = "Alpha"  # 현재 로봇 섹터 ("Alpha", "Bravo", "Charlie")
+DASHBOARD_UPDATE_INTERVAL = 3.0  # 대시보드 업데이트 간격 (초)
 

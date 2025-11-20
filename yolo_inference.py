@@ -55,11 +55,20 @@ class YOLOONNX:
         available_providers = ort.get_available_providers()
         print(f"사용 가능한 ONNX Runtime 프로바이더: {available_providers}")
         
+        # AzureExecutionProvider 제외
+        filtered_providers = [p for p in available_providers if p != 'AzureExecutionProvider']
+        
         # 프로바이더 우선순위: CUDA (있으면) -> CPU
         providers = []
-        if 'CUDAExecutionProvider' in available_providers:
+        if 'CUDAExecutionProvider' in filtered_providers:
             providers.append('CUDAExecutionProvider')
-        providers.append('CPUExecutionProvider')
+        if 'CPUExecutionProvider' in filtered_providers:
+            providers.append('CPUExecutionProvider')
+        
+        if not providers:
+            raise RuntimeError("사용 가능한 프로바이더가 없습니다. (CUDA 또는 CPU 필요)")
+        
+        print(f"사용할 프로바이더: {providers}")
         
         try:
             session = ort.InferenceSession(
