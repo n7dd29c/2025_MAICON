@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 7
+names: ['Box', 'Car', 'Enemy', 'Hazmat', 'Missile', 'Mortar', 'Tank']
+
+roboflow:
+  workspace: 3000
+  project: object7-iy3zn
+  version: 7
+  license: Private
+  url: https://app.roboflow.com/3000/object7-iy3zn/7
