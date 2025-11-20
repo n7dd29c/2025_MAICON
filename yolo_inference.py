@@ -242,3 +242,4 @@ class YOLOONNX:
             import traceback
             traceback.print_exc()
             return []
+
