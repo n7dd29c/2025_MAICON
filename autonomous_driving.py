@@ -1,9 +1,10 @@
 """
 자율주행 메인 실행 파일
-프레임 분산 처리 방식:
-- 홀수 프레임: 차선 인식 및 자율주행 제어 (실시간)
-- 4의 배수 프레임 (0, 4, 8, ...): YOLO 객체 인식 (무거운 작업)
-- 4의 배수+2 프레임 (2, 6, 10, ...): ArUco 마커 + QR 코드 인식 (가벼운 작업)
+모든 프레임에서 모든 인식 실행:
+- 모든 프레임: 차선 인식 및 자율주행 제어 (실시간)
+- 모든 프레임: YOLO 객체 인식
+- 모든 프레임: ArUco 마커 인식
+- 모든 프레임: QR 코드 인식
 """
 import cv2
 import time
@@ -204,210 +205,158 @@ class AutonomousDriving:
     
     def process_frame(self, frame: np.ndarray) -> tuple:
         """
-        프레임 처리 (분산 처리 방식)
-        - 모든 프레임: 차선 인식 및 자율주행 제어 (실시간, 최우선)
-        - 4의 배수 프레임 (0, 4, 8, ...): YOLO 객체 인식 (무거운 작업)
-        - 4의 배수+2 프레임 (2, 6, 10, ...): ArUco 마커 + QR 코드 인식 (가벼운 작업)
+        프레임 처리 (모든 프레임에서 모든 인식 실행)
+        - 모든 프레임: 차선 인식, YOLO 객체 인식, ArUco 마커, QR 코드 인식
+        - 실시간 제어를 위해 모든 인식을 매 프레임마다 실행
         
         Returns:
             (processed_frame, control_command): 처리된 프레임과 제어 명령
         """
         self.frame_count += 1
+        vis_frame = frame.copy()
+        status_messages = []
         
-        # 짝수 프레임: 객체 인식 작업 (분산 처리, 차선 인식과 병렬)
-        if self.frame_count % 2 == 0:
-            vis_frame = frame.copy()
+        # 모든 프레임: YOLO 객체 인식
+        from config import USE_YOLO
+        if USE_YOLO:
+            # YOLO 사용 (ONNX) - 모든 객체 감지
+            avoidance_objects, all_objects = self.object_detector.detect_objects(frame)
+            potholes = avoidance_objects  # 회피 대상 객체
             
-            # 4의 배수 프레임: YOLO 객체 인식 (포트홀 등)
-            if self.frame_count % 4 == 0:
-                from config import USE_YOLO
-                if USE_YOLO:
-                    # YOLO 사용 (TensorRT) - 모든 객체 감지
-                    avoidance_objects, all_objects = self.object_detector.detect_objects(frame)
-                    potholes = avoidance_objects  # 회피 대상 객체
-                    
-                    # 회피 계획 생성 (포트홀 회피 활성화 시에만)
-                    from config import USE_POTHOLE_AVOIDANCE
-                    if USE_POTHOLE_AVOIDANCE and potholes:
-                        # 가장 가까운 포트홀 선택 (이미지 하단에 가까운 것, y 좌표가 큰 것)
-                        closest_pothole = max(potholes, key=lambda p: p['center'][1])
+            # 회피 계획 생성 (포트홀 회피 활성화 시에만)
+            from config import USE_POTHOLE_AVOIDANCE
+            if USE_POTHOLE_AVOIDANCE and potholes:
+                # 가장 가까운 포트홀 선택 (이미지 하단에 가까운 것, y 좌표가 큰 것)
+                closest_pothole = max(potholes, key=lambda p: p['center'][1])
+                
+                avoidance_command = self.avoidance_planner.plan_avoidance(
+                    pothole=closest_pothole,
+                    left_lane=self.last_left_lane,
+                    right_lane=self.last_right_lane,
+                    current_offset=self.last_offset
+                )
+                self.current_avoidance_command = avoidance_command
+            else:
+                # 정상 주행 (회피 비활성화 또는 포트홀 없음)
+                self.current_avoidance_command = {'action': 'normal'}
+            
+            # 모든 객체 시각화
+            if all_objects:
+                vis_frame = self.object_detector.draw_objects(vis_frame, all_objects, show_class_name=True)
+                avoidance_count = len(potholes)
+                total_count = len(all_objects)
+                status_messages.append(f"YOLO: {total_count}개 (회피: {avoidance_count}개)")
+                
+                # 대시보드로 객체 감지 정보 전송
+                if USE_DASHBOARD and self.dashboard is not None:
+                    from config import DASHBOARD_UPDATE_INTERVAL
+                    current_time = time.time()
+                    # 일정 간격마다 업데이트
+                    if current_time - self.last_dashboard_update >= DASHBOARD_UPDATE_INTERVAL:
+                        # 객체 타입별 카운트 집계
+                        detection_counts = {}
+                        for obj in all_objects:
+                            obj_type = obj.get('class_name', 'unknown').lower()
+                            detection_counts[obj_type] = detection_counts.get(obj_type, 0) + 1
                         
-                        avoidance_command = self.avoidance_planner.plan_avoidance(
-                            pothole=closest_pothole,
-                            left_lane=self.last_left_lane,
-                            right_lane=self.last_right_lane,
-                            current_offset=self.last_offset
-                        )
-                        self.current_avoidance_command = avoidance_command
-                    else:
-                        # 정상 주행 (회피 비활성화 또는 포트홀 없음)
-                        self.current_avoidance_command = {'action': 'normal'}
-                    
-                    # 모든 객체 시각화
-                    if all_objects:
-                        vis_frame = self.object_detector.draw_objects(vis_frame, all_objects, show_class_name=True)
-                        avoidance_count = len(potholes)
-                        total_count = len(all_objects)
-                        status_msg = f"YOLO: {total_count}개 (회피: {avoidance_count}개)"
+                        # 대시보드 형식으로 변환
+                        detections = [
+                            {"type": obj_type, "count": count}
+                            for obj_type, count in detection_counts.items()
+                        ]
                         
-                        # 대시보드로 객체 감지 정보 전송
-                        if USE_DASHBOARD and self.dashboard is not None:
-                            from config import DASHBOARD_UPDATE_INTERVAL
-                            current_time = time.time()
-                            # 일정 간격마다 업데이트
-                            if current_time - self.last_dashboard_update >= DASHBOARD_UPDATE_INTERVAL:
-                                # 객체 타입별 카운트 집계
-                                detection_counts = {}
-                                for obj in all_objects:
-                                    obj_type = obj.get('class_name', 'unknown').lower()
-                                    detection_counts[obj_type] = detection_counts.get(obj_type, 0) + 1
-                                
-                                # 대시보드 형식으로 변환
-                                detections = [
-                                    {"type": obj_type, "count": count}
-                                    for obj_type, count in detection_counts.items()
-                                ]
-                                
-                                # 대시보드로 전송 (현재 로봇 섹터 사용)
-                                self.dashboard.update_detection(self.current_sector, detections)
-                                self.last_dashboard_update = current_time
-                                print(f"대시보드 업데이트: {self.current_sector} 섹터, {len(detections)}개 객체 타입")
-                    else:
-                        status_msg = "YOLO: 객체 없음"
+                        # 대시보드로 전송 (현재 로봇 섹터 사용)
+                        self.dashboard.update_detection(self.current_sector, detections)
+                        self.last_dashboard_update = current_time
+                        print(f"대시보드 업데이트: {self.current_sector} 섹터, {len(detections)}개 객체 타입")
+            else:
+                status_messages.append("YOLO: 객체 없음")
+        else:
+            # 전통적인 CV 방법 (포트홀만)
+            potholes = self.object_detector.detect_potholes(frame)
+            if potholes:
+                vis_frame = self.object_detector.draw_potholes(vis_frame, potholes)
+                status_messages.append(f"포트홀: {len(potholes)}개")
+                
+                # 회피 계획 생성 (포트홀 회피 활성화 시에만)
+                from config import USE_POTHOLE_AVOIDANCE
+                if USE_POTHOLE_AVOIDANCE:
+                    closest_pothole = max(potholes, key=lambda p: p['center'][1])
+                    avoidance_command = self.avoidance_planner.plan_avoidance(
+                        pothole=closest_pothole,
+                        left_lane=self.last_left_lane,
+                        right_lane=self.last_right_lane,
+                        current_offset=self.last_offset
+                    )
+                    self.current_avoidance_command = avoidance_command
                 else:
-                    # 전통적인 CV 방법 (포트홀만)
-                    potholes = self.object_detector.detect_potholes(frame)
-                    if potholes:
-                        vis_frame = self.object_detector.draw_potholes(vis_frame, potholes)
-                        status_msg = f"포트홀: {len(potholes)}개"
-                        
-                        # 회피 계획 생성 (포트홀 회피 활성화 시에만)
-                        from config import USE_POTHOLE_AVOIDANCE
-                        if USE_POTHOLE_AVOIDANCE:
-                            closest_pothole = max(potholes, key=lambda p: p['center'][1])
-                            avoidance_command = self.avoidance_planner.plan_avoidance(
-                                pothole=closest_pothole,
-                                left_lane=self.last_left_lane,
-                                right_lane=self.last_right_lane,
-                                current_offset=self.last_offset
-                            )
-                            self.current_avoidance_command = avoidance_command
-                        else:
-                            # 회피 비활성화 - 정상 주행
-                            self.current_avoidance_command = {'action': 'normal'}
-                    else:
-                        self.current_avoidance_command = {'action': 'normal'}
-                        status_msg = "포트홀: 없음"
-            
-            # 4의 배수+2 프레임 또는 모든 짝수 프레임: ArUco 마커 + QR 코드 인식 (더 자주 실행)
-            # YOLO가 실행되는 4의 배수 프레임이 아닌 경우 ArUco/QR 실행
-            if self.frame_count % 4 != 0:  # YOLO 프레임이 아닌 모든 짝수 프레임에서 실행
-                aruco_markers = []
-                qr_codes = []
-                
-                # ArUco 마커 감지
-                if USE_ARUCO and self.aruco_detector is not None:
-                    aruco_command, aruco_markers = self.aruco_detector.detect_markers(frame)
-                    
-                    if aruco_command is not None:
-                        marker_id = aruco_command.get('marker_id')
-                        action = aruco_command.get('action')
-                        
-                        # 대시보드로 ArUco 마커 감지 정보 전송 (통신 보고)
-                        if USE_DASHBOARD and self.dashboard is not None:
-                            # 마커 ID별 섹터 설정 확인
-                            from config import ARUCO_MARKER_SECTORS, DASHBOARD_SECTOR
-                            marker_sector = ARUCO_MARKER_SECTORS.get(marker_id, None)
-                            
-                            # 마커에 섹터가 설정되어 있으면 로봇 섹터 업데이트
-                            if marker_sector is not None:
-                                old_sector = self.current_sector
-                                self.current_sector = marker_sector
-                                print(f"로봇 섹터 변경: {old_sector} → {marker_sector} (ArUco ID={marker_id})")
-                            else:
-                                # 마커에 섹터가 없으면 현재 섹터 유지
-                                marker_sector = self.current_sector
-                            
-                            # 포인트 추가 (ArUco 마커 감지 시)
-                            point_name = f"aruco_{marker_id}_{action}"
-                            self.dashboard.add_point(point_name)
-                            print(f"대시보드 전송: ArUco ID={marker_id}, Action={action}, Sector={marker_sector}")
-                            
-                            # Finish 마커(ID 13) 감지 시 즉시 대시보드로 전송
-                            if marker_sector == "Finish" or marker_id == 13:
-                                print(f"임무 종료 마커 감지 (ID={marker_id}) - 대시보드로 즉시 전송")
-                                self.dashboard.send_dashboard_json()
-                            
-                            # 섹터별 감지 정보 업데이트 (선택적)
-                            # 필요시 아래 주석을 해제하여 섹터별 감지 정보도 전송
-                            # detection_info = [{"type": f"aruco_{marker_id}", "count": 1}]
-                            # self.dashboard.update_detection(marker_sector, detection_info)
-                        
-                        # 주행 제어 여부 확인
-                        from config import ARUCO_CONTROL_ENABLED
-                        if ARUCO_CONTROL_ENABLED:
-                            # 주행 제어 활성화 시에만 명령 저장
-                            self.current_aruco_command = aruco_command
-                            from config import ARUCO_TURN_DURATION
-                            self.aruco_command_start_time = time.time()
-                            self.aruco_command_duration = ARUCO_TURN_DURATION
-                            print(f"ArUco 주행 명령 저장: {action}, ID={marker_id}")
-                        else:
-                            # 통신 보고만 수행 (주행 제어 안 함)
-                            self.current_aruco_command = None
-                            print(f"ArUco 마커 감지 (통신 보고만): ID={marker_id}, Action={action}")
-                    else:
-                        # ArUco 명령이 없으면 이전 명령 지속 시간 확인 (주행 제어 활성화 시에만)
-                        from config import ARUCO_CONTROL_ENABLED
-                        if ARUCO_CONTROL_ENABLED and self.aruco_command_start_time is not None:
-                            elapsed = time.time() - self.aruco_command_start_time
-                            if elapsed >= self.aruco_command_duration:
-                                # 지속 시간 경과 시 명령 해제
-                                self.current_aruco_command = None
-                                self.aruco_command_start_time = None
-                    
-                    # ArUco 마커 시각화 (감지된 마커가 있으면)
-                    if aruco_markers:
-                        vis_frame = self.aruco_detector.draw_markers(vis_frame, aruco_markers)
-                        print(f"ArUco 마커 {len(aruco_markers)}개 감지됨")
-                
-                # QR 코드 인식 (짝수 프레임에서도 감지, LED는 모든 프레임에서 처리)
-                # LED 제어는 모든 프레임에서 처리하므로 여기서는 시각화만
-                if USE_QR and self.qr_detector is not None:
-                    qr_codes = self.qr_detector.detect(frame)
-                    if qr_codes:
-                        # QR 코드 시각화
-                        vis_frame = self.qr_detector.draw_codes(vis_frame, qr_codes)
-                
-                # 상태 메시지
-                status_msg = "ArUco/QR 인식"
-                if self.current_aruco_command:
-                    status_msg += f" | ArUco: {self.current_aruco_command.get('action', 'unknown')}"
-                if qr_codes:
-                    status_msg += f" | QR: {len(qr_codes)}개"
-                if not aruco_markers and not qr_codes:
-                    status_msg += " | 감지 없음"
-            
-            # 차선 정보 표시 (모든 짝수 프레임에)
-            if self.last_left_lane is not None and self.last_right_lane is not None:
-                center_point = self.lane_detector.calculate_center(
-                    self.last_left_lane, self.last_right_lane, None
-                )
-                vis_frame = self.lane_detector.draw_lanes(
-                    vis_frame, self.last_left_lane, self.last_right_lane, center_point, None
-                )
-            
-            # 상태 메시지 표시
-            cv2.putText(vis_frame, status_msg,
-                       (10, self.image_height - 50),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-            
-            # 짝수 프레임에서는 객체 인식만 수행하고 차선 인식은 아래에서 수행
-            pass
+                    # 회피 비활성화 - 정상 주행
+                    self.current_avoidance_command = {'action': 'normal'}
+            else:
+                self.current_avoidance_command = {'action': 'normal'}
+                status_messages.append("포트홀: 없음")
         
-        # 모든 프레임: 차선 인식 및 자율주행 제어 (실시간 제어를 위해)
-        # 차선 감지 (중앙선 포함)
-        left_lane, right_lane, center_lane = self.lane_detector.detect_lanes(frame)
+        # 모든 프레임: ArUco 마커 감지
+        aruco_markers = []
+        if USE_ARUCO and self.aruco_detector is not None:
+            aruco_command, aruco_markers = self.aruco_detector.detect_markers(frame)
+            
+            if aruco_command is not None:
+                marker_id = aruco_command.get('marker_id')
+                action = aruco_command.get('action')
+                
+                # 대시보드로 ArUco 마커 감지 정보 전송 (통신 보고)
+                if USE_DASHBOARD and self.dashboard is not None:
+                    # 마커 ID별 섹터 설정 확인
+                    from config import ARUCO_MARKER_SECTORS, DASHBOARD_SECTOR
+                    marker_sector = ARUCO_MARKER_SECTORS.get(marker_id, None)
+                    
+                    # 마커에 섹터가 설정되어 있으면 로봇 섹터 업데이트
+                    if marker_sector is not None:
+                        old_sector = self.current_sector
+                        self.current_sector = marker_sector
+                        print(f"로봇 섹터 변경: {old_sector} → {marker_sector} (ArUco ID={marker_id})")
+                    else:
+                        # 마커에 섹터가 없으면 현재 섹터 유지
+                        marker_sector = self.current_sector
+                    
+                    # 포인트 추가 (ArUco 마커 감지 시)
+                    point_name = f"aruco_{marker_id}_{action}"
+                    self.dashboard.add_point(point_name)
+                    print(f"대시보드 전송: ArUco ID={marker_id}, Action={action}, Sector={marker_sector}")
+                    
+                    # Finish 마커(ID 13) 감지 시 즉시 대시보드로 전송
+                    if marker_sector == "Finish" or marker_id == 13:
+                        print(f"임무 종료 마커 감지 (ID={marker_id}) - 대시보드로 즉시 전송")
+                        self.dashboard.send_dashboard_json()
+                
+                # 주행 제어 여부 확인
+                from config import ARUCO_CONTROL_ENABLED
+                if ARUCO_CONTROL_ENABLED:
+                    # 주행 제어 활성화 시에만 명령 저장
+                    self.current_aruco_command = aruco_command
+                    from config import ARUCO_TURN_DURATION
+                    self.aruco_command_start_time = time.time()
+                    self.aruco_command_duration = ARUCO_TURN_DURATION
+                    print(f"ArUco 주행 명령 저장: {action}, ID={marker_id}")
+                else:
+                    # 통신 보고만 수행 (주행 제어 안 함)
+                    self.current_aruco_command = None
+                    print(f"ArUco 마커 감지 (통신 보고만): ID={marker_id}, Action={action}")
+            else:
+                # ArUco 명령이 없으면 이전 명령 지속 시간 확인 (주행 제어 활성화 시에만)
+                from config import ARUCO_CONTROL_ENABLED
+                if ARUCO_CONTROL_ENABLED and self.aruco_command_start_time is not None:
+                    elapsed = time.time() - self.aruco_command_start_time
+                    if elapsed >= self.aruco_command_duration:
+                        # 지속 시간 경과 시 명령 해제
+                        self.current_aruco_command = None
+                        self.aruco_command_start_time = None
+            
+            # ArUco 마커 시각화 (감지된 마커가 있으면)
+            if aruco_markers:
+                vis_frame = self.aruco_detector.draw_markers(vis_frame, aruco_markers)
+                status_messages.append(f"ArUco: {len(aruco_markers)}개")
         
         # 모든 프레임: QR 코드 감지 (LED 제어를 위해)
         qr_codes = []
@@ -415,6 +364,10 @@ class AutonomousDriving:
             qr_codes = self.qr_detector.detect(frame)
             
             if qr_codes:
+                # QR 코드 시각화
+                vis_frame = self.qr_detector.draw_codes(vis_frame, qr_codes)
+                status_messages.append(f"QR: {len(qr_codes)}개")
+                
                 # QR 코드 감지 시 LED 제어
                 for qr in qr_codes:
                     qr_data = qr['data']
@@ -470,6 +423,17 @@ class AutonomousDriving:
                         self.qr_led_start_time = None
                         self.last_qr_data = None
         
+        # 상태 메시지 표시
+        if status_messages:
+            status_text = " | ".join(status_messages)
+            cv2.putText(vis_frame, status_text,
+                       (10, self.image_height - 50),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        
+        # 모든 프레임: 차선 인식 및 자율주행 제어 (실시간 제어를 위해)
+        # 차선 감지 (중앙선 포함)
+        left_lane, right_lane, center_lane = self.lane_detector.detect_lanes(frame)
+        
         # 차선 미감지 처리
         if center_lane is None and (left_lane is None or right_lane is None):
             self.lane_lost_count += 1
@@ -477,9 +441,7 @@ class AutonomousDriving:
             # 초기 몇 프레임은 대기
             if self.frame_count <= 10:
                 print(f"차선 감지 대기 중... (프레임 {self.frame_count})")
-                # 짝수 프레임이면 제어 명령 없이 반환
-                if self.frame_count % 2 == 0:
-                    return frame, None
+                return vis_frame, None
             
             # 이전 차선 정보가 있으면 사용하여 계속 주행
             if self.last_left_lane is not None and self.last_right_lane is not None:
@@ -569,12 +531,8 @@ class AutonomousDriving:
         
         # 시각화 (중앙선 포함)
         vis_frame = self.lane_detector.draw_lanes(
-            frame, left_lane, right_lane, center_point, center_lane
+            vis_frame, left_lane, right_lane, center_point, center_lane
         )
-        
-        # QR 코드 시각화 (모든 프레임에서)
-        if USE_QR and self.qr_detector is not None and qr_codes:
-            vis_frame = self.qr_detector.draw_codes(vis_frame, qr_codes)
         
         # 제어 정보 오버레이
         vis_frame = self._draw_control_info(vis_frame, control_command)
@@ -604,7 +562,7 @@ class AutonomousDriving:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
         
         # 프레임 번호
-        cv2.putText(frame, f"Frame: {self.frame_count} (홀수만 처리)",
+        cv2.putText(frame, f"Frame: {self.frame_count} (모든 프레임 처리)",
                    (10, frame.shape[0] - 20),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
@@ -650,7 +608,7 @@ class AutonomousDriving:
                 (self.image_width, self.image_height)
             )
         
-        print("자율주행 시작 (홀수 프레임만 처리)")
+        print("자율주행 시작 (모든 프레임에서 차선/객체/QR/ArUco 인식)")
         print("종료: 'q' 키 누르기")
         
         try:
