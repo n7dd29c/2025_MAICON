@@ -93,19 +93,19 @@ class ArucoTrigger(object):
 
         # 사용자가 직접 duration(sec)을 나중에 조정
         self.rules = {
-            1: {1: [("right_deg", 45), ("YOLO", 0.0), ("left_deg", 45), ("CHECKPOINT_PASSING", 0.0)]},
-            2: {1: [("right_deg", 45), ("YOLO", 0.0)]},
+            1: {1: [("right", 1.5), ("YOLO", 0.0), ("left", 1.5), ("CHECKPOINT_PASSING", 0.0)]},
+            2: {1: [("right", 0,5), ("YOLO", 0.0)]},
             3: {1: [("YOLO", 0.0)]},
             4: {1: [("YOLO", 0.0)]},
             5: {1: [("YOLO", 0.0)]},
-            6: {1: [("YOLO", 0.0)]},
-            7: {1: [("left_deg", 45), ("YOLO", 0.0), ("right_deg", 45)]},
-            8: {1: [("POTHOLE_AVOIDANCE", 0.0), ("CHECKPOINT_PASSING", 0.0)]},
-            9: {1: [("left_deg", 45), ("YOLO", 0.0), ("right_deg", 45)]},
-            10: {1: [("CHECKPOINT_PASSING", 0.0)]},
-            11: {1: [("left_deg", 45), ("YOLO", 0.0), ("right_deg", 45)]},
-            12: {1: [("left_deg", 45), ("YOLO", 0.0), ("right_deg", 45)]},
-            13: {1: []}
+            6: {1: [("YOLO", 0.0), ("right", 0.5), ("YOLO", 0.0)]},
+            7: {1: [("left", 1), ("YOLO", 0.0), ("right", 1)]},
+            8: {1: [("POTHOLE_AVOIDANCE", 0.0), ("right", 0.5), ("YOLO", 0.0), ("left", 0.5), ("CHECKPOINT_PASSING", 0.0)]},
+            9: {1: [("left", 1), ("YOLO", 0.0), ("right", 1)]},
+            10: {1:[("CHECKPOINT_PASSING", 0.0), ("POTHOLE_AVOIDANCE")]},
+            11: {1:[("left", 0.5), ("YOLO", 0.0), ("right", 0.5)]},
+            12: {1:[("left", 0.5), ("YOLO", 0.0), ("right", 0.5)]},
+            13: {}
         }
 
         # ArUco 감지기
@@ -189,11 +189,11 @@ class ArucoTrigger(object):
         dashboard_sector = sector
         if sector.startswith("sector"):
             sector_num = int(sector.replace("sector", ""))
-            if 1 <= sector_num <= 3:
+            if 1 <= sector_num <= 5:
                 dashboard_sector = "Alpha"
-            elif 4 <= sector_num <= 6:
+            elif 6 <= sector_num <= 7:
                 dashboard_sector = "Bravo"
-            elif 7 <= sector_num <= 9:
+            elif 8 <= sector_num <= 9:
                 dashboard_sector = "Charlie"
         elif sector == "Finish":
             dashboard_sector = "Alpha"  # Finish는 기본적으로 Alpha로 처리
@@ -335,51 +335,27 @@ class ArucoTrigger(object):
         self.tiki.stop()
 
     # 움직임 / 정해진 시간만큼 직진, 회전 또는 각도 기반 회전
-    def _rotate_or_move(self, direction, value):
+    def _rotate_or_move(self, direction, duration_sec):
 
-        # 직진/후진은 초 단위
+        # 직진 출력 : 20 RPM / 회전 출력 : 40 RPM 사용 예정
         if direction == "forward":  
             self.tiki.forward(self.straight_rpm)
-            time.sleep(value)
-            self.tiki.stop()
 
         elif direction == "backward":
             self.tiki.backward(self.straight_rpm)
-            time.sleep(value)
-            self.tiki.stop()
 
-        # 각도 기반 회전 (right_deg, left_deg)
-        elif direction == "right_deg":
-            # 각도를 초로 변환: (각도 / 360) * (60 / RPM) = 초
-            # 예: 45도, 40 RPM -> (45/360) * (60/40) = 0.1875초
-            degrees = value
-            duration = (degrees / 360.0) * (60.0 / self.turn_rpm)
-            self.tiki.clockwise(self.turn_rpm)
-            time.sleep(duration)
-            self.tiki.stop()
-            print(f"[ArucoTrigger] 우회전 {degrees}도 완료 ({duration:.3f}초)")
-
-        elif direction == "left_deg":
-            degrees = value
-            duration = (degrees / 360.0) * (60.0 / self.turn_rpm)
-            self.tiki.counter_clockwise(self.turn_rpm)
-            time.sleep(duration)
-            self.tiki.stop()
-            print(f"[ArucoTrigger] 좌회전 {degrees}도 완료 ({duration:.3f}초)")
-
-        # 기존 초 단위 회전 (호환성)
         elif direction == "right":
             self.tiki.clockwise(self.turn_rpm)
-            time.sleep(value)
-            self.tiki.stop()
 
         elif direction == "left":
             self.tiki.counter_clockwise(self.turn_rpm)
-            time.sleep(value)
-            self.tiki.stop()
 
         else:
             return
+
+        time.sleep(duration_sec)
+        self.tiki.stop()
+        time.sleep(1)
 
         # 결과 출력
         # print(f"[ArucoTrigger] Action: {direction} | {value} sec/deg")

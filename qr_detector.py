@@ -42,8 +42,14 @@ class QRDetector:
         if self.qr_detector is None:
             return []
         
+        if frame is None:
+            return []
+        
         qr_codes = []
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        try:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        except Exception as e:
+            return []
         
         # 여러 전처리 방법 시도
         preprocess_methods = [
@@ -144,6 +150,12 @@ class QRDetector:
                             break
                 except:
                     continue
+        
+        # QR 코드가 감지되지 않았을 때 주기적으로 로그 출력 (디버깅용)
+        if not qr_codes:
+            self.qr_detection_count = 0
+        else:
+            self.qr_detection_count += 1
         
         return qr_codes
     

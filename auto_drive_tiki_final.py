@@ -236,9 +236,15 @@ def main():
             json_filename="2W9G.json",
             poll_interval=1.0
         )
-        # 초기 화재 섹터 읽기 시도
-        fire_sector_reader.read_fire_sectors()
         print("[MAIN] 화재 섹터 리더 초기화 완료")
+        
+        # JSON 파일이 생성될 때까지 대기
+        print("[MAIN] report/2W9G.json 파일을 기다리는 중...")
+        if fire_sector_reader.wait_for_file():
+            fire_sector_reader.read_fire_sectors()
+            print("[MAIN] 화재 섹터 정보 로드 완료 - 주행 시작")
+        else:
+            print("[MAIN] JSON 파일 대기 시간 초과 - 주행 시작 (화재 섹터 정보 없음)")
     except Exception as e:
         print(f"[MAIN] 화재 섹터 리더 초기화 실패: {e}")
         fire_sector_reader = None
@@ -247,9 +253,25 @@ def main():
     qr_detector = None
     try:
         qr_detector = QRDetector()
-        print("[MAIN] QR 코드 감지기 초기화 완료")
+        if qr_detector.qr_detector is None:
+            print("[MAIN] 경고: QR 코드 감지기가 None입니다. OpenCV 버전을 확인하세요.")
+            import cv2
+            print(f"[MAIN] OpenCV 버전: {cv2.__version__}")
+            print(f"[MAIN] cv2.QRCodeDetector 존재 여부: {hasattr(cv2, 'QRCodeDetector')}")
+        else:
+            print("[MAIN] QR 코드 감지기 초기화 완료")
+            # 테스트 감지기 동작 확인
+            try:
+                import numpy as np
+                test_frame = np.zeros((100, 100, 3), dtype=np.uint8)
+                result = qr_detector.detect(test_frame)
+                print(f"[MAIN] QR 감지기 테스트: 정상 (결과 타입: {type(result)})")
+            except Exception as e:
+                print(f"[MAIN] QR 감지기 테스트 실패: {e}")
     except Exception as e:
         print(f"[MAIN] QR 코드 감지기 초기화 실패: {e}")
+        import traceback
+        traceback.print_exc()
         qr_detector = None
 
     # ArUco 트리거 초기화 (YOLO, Dashboard, FireSectorReader 전달)
@@ -265,7 +287,7 @@ def main():
     
     # QR 코드 감지 상태
     frame_count = 0
-    qr_detection_interval = 5  # 5프레임마다 한 번씩 (성능 고려)
+    qr_detection_interval = 1  # 매 프레임마다 실행 (QR 코드 인식 개선)
     last_qr_data = None
 
     pipeline = (
@@ -290,20 +312,69 @@ def main():
             if fire_sector_reader and int(time.time()) % 5 == 0:  # 5초마다 한 번씩
                 fire_sector_reader.update_fire_sectors()
 
-            # QR 코드 인식 (주행 중일 때만, 주기적으로)
-            if qr_detector and aruco.mode == "LANE_FOLLOW" and frame_count % qr_detection_interval == 0:
-                qr_codes = qr_detector.detect(frame)
-                if qr_codes:
-                    for qr in qr_codes:
-                        qr_data = qr['data']
-                        # 새로운 QR 코드 감지 시 대시보드 전송
-                        if qr_data != last_qr_data:
-                            last_qr_data = qr_data
-                            print(f"[QR] QR 코드 감지: {qr_data}")
-                            # 대시보드로 포인트 추가 (선택적)
-                            if dashboard:
-                                point_name = f"qr_{qr_data[:10]}"  # QR 데이터의 처음 10자만 사용
-                                dashboard.add_point(point_name)
+            # QR 코드 인식 (항상 실행, 매 프레임마다)
+            if qr_detector is None:
+                if frame_count % 100 == 0:  # 100프레임마다 한 번씩만 로그 출력
+                    print("[QR] QR 감지기가 초기화되지 않았습니다.")
+            elif frame_count % qr_detection_interval == 0:
+                if frame is None:
+                    if frame_count % 100 == 0:  # 100프레임마다 한 번씩만 로그 출력
+                        print("[QR] 프레임이 None입니다.")
+                else:
+                    # 디버그: 주기적으로 QR 감지 시도 로그
+                    if frame_count % 300 == 0:  # 10초마다 (30fps 기준)
+                        print(f"[QR] QR 감지 시도 중... (프레임: {frame_count}, 크기: {frame.shape})")
+                    
+                    qr_codes = qr_detector.detect(frame)
+                    
+                    if qr_codes:
+                        for qr in qr_codes:
+                            qr_data = qr['data']
+                            # 새로운 QR 코드 감지 시 LED 제어 및 대시보드 전송
+                            if qr_data != last_qr_data:
+                                last_qr_data = qr_data
+                                print(f"[QR] QR 코드 감지: {qr_data}")
+                                
+                                # QR 코드 데이터 파싱 및 LED 제어
+                                try:
+                                    if qr_data.startswith("ID_"):
+                                        parts = qr_data.split("_")
+                                        if len(parts) >= 3:
+                                            shape_str = parts[1]  # O, X, #
+                                            color_str = parts[2].upper()  # R, G, B
+                                            
+                                            # LED 색상 값 설정 (RGB 형식)
+                                            if color_str == 'R':
+                                                r, g, b = 50, 0, 0  # 빨강
+                                                led_color_name = "red"
+                                            elif color_str == 'G':
+                                                r, g, b = 0, 50, 0  # 녹색
+                                                led_color_name = "green"
+                                            elif color_str == 'B':
+                                                r, g, b = 0, 0, 50  # 파랑
+                                                led_color_name = "blue"
+                                            else:
+                                                r, g, b = 0, 50, 0  # 기본: 녹색
+                                                led_color_name = "green"
+                                            
+                                            # Tiki LED 제어 (top 16-bit LED Strip 전체)
+                                            try:
+                                                # 모든 LED에 같은 색상 설정
+                                                for i in range(16):
+                                                    tiki.set_led(0, i, r, g, b)
+                                                print(f"[QR] LED 켜짐: {led_color_name} (모양: {shape_str})")
+                                            except Exception as e:
+                                                print(f"[QR] LED 제어 오류: {e}")
+                                                
+                                except Exception as e:
+                                    print(f"[QR] QR 데이터 파싱 오류: {e}")
+                                
+                                # 대시보드로 포인트 추가
+                                if dashboard:
+                                    point_name = f"qr_{qr_data[:10]}"  # QR 데이터의 처음 10자만 사용
+                                    dashboard.add_point(point_name)
+                    elif frame_count % 300 == 0:  # 10초마다 (30fps 기준)
+                        print(f"[QR] QR 코드 미감지 (프레임: {frame_count})")
 
             # Aruco
             aruco.observe_and_maybe_trigger(frame)
